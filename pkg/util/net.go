@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"math/rand"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -118,4 +119,13 @@ func AddressCount(network *net.IPNet) float64 {
 		return 0
 	}
 	return math.Pow(2, float64(bits-prefixLen)) - 2
+}
+
+func GenerateRandomV4IP(cidr string) string {
+	ip := strings.Split(cidr, "/")[0]
+	netMask, _ := strconv.Atoi(strings.Split(cidr, "/")[1])
+	hostNum := 32 - netMask
+	add := rand.Intn(1 << (uint(hostNum) - 1))
+	t := big.NewInt(0).Add(Ip2BigInt(ip), big.NewInt(int64(add)))
+	return fmt.Sprintf("%s/%d", BigInt2Ip(t), netMask)
 }
