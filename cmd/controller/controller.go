@@ -13,16 +13,15 @@ import (
 	v1 "k8s.io/api/authorization/v1"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apiserver/pkg/server"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	"github.com/kubeovn/kube-ovn/pkg/controller"
-	"github.com/kubeovn/kube-ovn/pkg/ovs"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 	"github.com/kubeovn/kube-ovn/versions"
 )
@@ -35,7 +34,7 @@ func CmdMain() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		stopCh := server.SetupSignalHandler()
+		stopCh := signals.SetupSignalHandler().Done()
 		<-stopCh
 		cancel()
 	}()
@@ -54,7 +53,6 @@ func CmdMain() {
 		util.LogFatalAndExit(err, "failed to check permission")
 	}
 
-	go loopOvnNbctlDaemon(config)
 	go func() {
 		mux := http.NewServeMux()
 		if config.EnableMetrics {
@@ -116,8 +114,7 @@ func CmdMain() {
 		RetryPeriod:   6 * time.Second,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				ctl := controller.NewController(config)
-				ctl.Run(ctx)
+				controller.Run(ctx, config)
 			},
 			OnStoppedLeading: func() {
 				select {
@@ -134,28 +131,6 @@ func CmdMain() {
 		ReleaseOnCancel: true,
 		Name:            ovnLeaderResource,
 	})
-}
-
-func loopOvnNbctlDaemon(config *controller.Configuration) {
-	for {
-		daemonSocket := os.Getenv("OVN_NB_DAEMON")
-		time.Sleep(5 * time.Second)
-
-		if _, err := os.Stat(daemonSocket); os.IsNotExist(err) || daemonSocket == "" {
-			if err := ovs.StartOvnNbctlDaemon(config.OvnNbAddr); err != nil {
-				klog.Errorf("failed to start ovn-nbctl daemon %v", err)
-			}
-		}
-
-		// ovn-nbctl daemon may hang and cannot process further request.
-		// In case of that, we need to start a new daemon.
-		if err := ovs.CheckAlive(); err != nil {
-			klog.Warningf("ovn-nbctl daemon doesn't return, start a new daemon")
-			if err := ovs.StartOvnNbctlDaemon(config.OvnNbAddr); err != nil {
-				klog.Errorf("failed to start ovn-nbctl daemon %v", err)
-			}
-		}
-	}
 }
 
 func checkPermission(config *controller.Configuration) error {

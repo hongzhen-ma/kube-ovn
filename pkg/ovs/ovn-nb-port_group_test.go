@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	ovsclient "github.com/kubeovn/kube-ovn/pkg/ovsdb/client"
-	"github.com/kubeovn/kube-ovn/pkg/ovsdb/ovnnb"
-	"github.com/kubeovn/kube-ovn/pkg/util"
 	"github.com/ovn-org/libovsdb/model"
 	"github.com/ovn-org/libovsdb/ovsdb"
 	"github.com/stretchr/testify/require"
+
+	ovsclient "github.com/kubeovn/kube-ovn/pkg/ovsdb/client"
+	"github.com/kubeovn/kube-ovn/pkg/ovsdb/ovnnb"
 )
 
 func (suite *OvnClientTestSuite) testCreatePortGroup() {
@@ -41,31 +41,27 @@ func (suite *OvnClientTestSuite) testPortGroupResetPorts() {
 	t.Parallel()
 
 	ovnClient := suite.ovnClient
-	pgName := "test-reset-pg-ports"
-	prefix := "test-reset-ports"
+	lsName := "test-reset-pg-ports-ls"
+	pgName := "test-reset-pg-ports-pg"
+	prefix := "test-reset-pg-ports-lsp"
 	lspNames := make([]string, 0, 3)
 
-	err := ovnClient.CreatePortGroup(pgName, map[string]string{
-		"type": "security_group",
-		sgKey:  "test-sg",
-	})
+	err := ovnClient.CreateBareLogicalSwitch(lsName)
 	require.NoError(t, err)
 
 	for i := 1; i <= 3; i++ {
 		lspName := fmt.Sprintf("%s-%d", prefix, i)
 		lspNames = append(lspNames, lspName)
 
-		lsp := &ovnnb.LogicalSwitchPort{
-			UUID: ovsclient.NamedUUID(),
-			Name: lspName,
-			ExternalIDs: map[string]string{
-				"vendor": util.CniTypeName,
-			},
-		}
-
-		err := createLogicalSwitchPort(ovnClient, lsp)
+		err := ovnClient.CreateBareLogicalSwitchPort(lsName, lspName, "unknown", "")
 		require.NoError(t, err)
 	}
+
+	err = ovnClient.CreatePortGroup(pgName, map[string]string{
+		"type": "security_group",
+		sgKey:  "test-sg",
+	})
+	require.NoError(t, err)
 
 	err = ovnClient.PortGroupAddPorts(pgName, lspNames...)
 	require.NoError(t, err)
@@ -74,7 +70,7 @@ func (suite *OvnClientTestSuite) testPortGroupResetPorts() {
 	require.NoError(t, err)
 	require.NotEmpty(t, pg.Ports)
 
-	err = ovnClient.PortGroupResetPorts(pgName)
+	err = ovnClient.PortGroupSetPorts(pgName, nil)
 	require.NoError(t, err)
 
 	pg, err = ovnClient.GetPortGroup(pgName, false)
@@ -298,7 +294,7 @@ func (suite *OvnClientTestSuite) testListPortGroups() {
 	})
 }
 
-func (suite *OvnClientTestSuite) test_portGroupUpdatePortOp() {
+func (suite *OvnClientTestSuite) testPortGroupUpdatePortOp() {
 	t := suite.T()
 	t.Parallel()
 
@@ -366,7 +362,7 @@ func (suite *OvnClientTestSuite) test_portGroupUpdatePortOp() {
 	})
 }
 
-func (suite *OvnClientTestSuite) test_portGroupUpdateAclOp() {
+func (suite *OvnClientTestSuite) testPortGroupUpdateACLOp() {
 	t := suite.T()
 	t.Parallel()
 
@@ -383,7 +379,7 @@ func (suite *OvnClientTestSuite) test_portGroupUpdateAclOp() {
 	t.Run("add new acl to port group", func(t *testing.T) {
 		t.Parallel()
 
-		ops, err := ovnClient.portGroupUpdateAclOp(pgName, aclUUIDs, ovsdb.MutateOperationInsert)
+		ops, err := ovnClient.portGroupUpdateACLOp(pgName, aclUUIDs, ovsdb.MutateOperationInsert)
 		require.NoError(t, err)
 		require.Equal(t, []ovsdb.Mutation{
 			{
@@ -406,7 +402,7 @@ func (suite *OvnClientTestSuite) test_portGroupUpdateAclOp() {
 	t.Run("del acl from port group", func(t *testing.T) {
 		t.Parallel()
 
-		ops, err := ovnClient.portGroupUpdateAclOp(pgName, aclUUIDs, ovsdb.MutateOperationDelete)
+		ops, err := ovnClient.portGroupUpdateACLOp(pgName, aclUUIDs, ovsdb.MutateOperationDelete)
 		require.NoError(t, err)
 		require.Equal(t, []ovsdb.Mutation{
 			{
@@ -429,12 +425,12 @@ func (suite *OvnClientTestSuite) test_portGroupUpdateAclOp() {
 	t.Run("should return err when port group does not exist", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := ovnClient.portGroupUpdateAclOp("test-acl-op-pg-non-existent", aclUUIDs, ovsdb.MutateOperationInsert)
+		_, err := ovnClient.portGroupUpdateACLOp("test-acl-op-pg-non-existent", aclUUIDs, ovsdb.MutateOperationInsert)
 		require.ErrorContains(t, err, "object not found")
 	})
 }
 
-func (suite *OvnClientTestSuite) test_portGroupOp() {
+func (suite *OvnClientTestSuite) testPortGroupOp() {
 	t := suite.T()
 	t.Parallel()
 

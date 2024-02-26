@@ -1,16 +1,17 @@
 package kind
 
 import (
-	"fmt"
+	"context"
+	"errors"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/kubeovn/kube-ovn/pkg/util"
 	"github.com/kubeovn/kube-ovn/test/e2e/framework"
 	"github.com/kubeovn/kube-ovn/test/e2e/framework/docker"
 	"github.com/kubeovn/kube-ovn/test/e2e/framework/iproute"
@@ -79,63 +80,8 @@ func (n *Node) ListRoutes(nonLinkLocalUnicast bool) ([]iproute.Route, error) {
 	return result, nil
 }
 
-func (n *Node) ListIptableRules(table string) ([]string, error) {
-
-	nfTableRules, err := n.ListNFIptableRules(table)
-	if err != nil {
-		return nil, err
-	}
-	legacyTableRules, err := n.ListLegacyIptableRules(table)
-	if err != nil {
-		return nil, err
-	}
-
-	return append(nfTableRules, legacyTableRules...), nil
-}
-
-func (n *Node) ListNFIptableRules(table string) ([]string, error) {
-	var rules []string
-
-	for _, nftCmd := range []string{"/usr/sbin/iptables-nft", "/usr/sbin/ip6tables-nft"} {
-		_, stderr, err := n.Exec([]string{"ls", "-al", nftCmd}...)
-		if strings.Contains(string(stderr), "No such file or directory") {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		output, _, err := n.Exec(strings.Fields(fmt.Sprintf("%s -S -t %s ", nftCmd, table))...)
-		if err != nil {
-			return nil, err
-		}
-		rules = append(rules, strings.Split(string(output), "\n")...)
-	}
-
-	return rules, nil
-}
-
-func (n *Node) ListLegacyIptableRules(table string) ([]string, error) {
-	var rules []string
-
-	for _, legacyCmd := range []string{"/usr/sbin/iptables-legacy", "/usr/sbin/ip6tables-legacy"} {
-		output, _, err := n.Exec([]string{"ls", "-al", legacyCmd}...)
-		if err != nil {
-			return nil, err
-		}
-		if output != nil {
-			output, _, err = n.Exec(strings.Fields(fmt.Sprintf("%s -S -t %s ", legacyCmd, table))...)
-			if err != nil {
-				return nil, err
-			}
-			rules = append(rules, strings.Split(string(output), "\n")...)
-		}
-	}
-
-	return rules, nil
-}
-
 func (n *Node) WaitLinkToDisappear(linkName string, interval time.Duration, deadline time.Time) error {
-	err := wait.PollImmediate(interval, time.Until(deadline), func() (bool, error) {
+	err := wait.PollUntilContextTimeout(context.Background(), interval, time.Until(deadline), false, func(_ context.Context) (bool, error) {
 		framework.Logf("Waiting for link %s in node %s to disappear", linkName, n.Name())
 		links, err := n.ListLinks()
 		if err != nil {
@@ -153,9 +99,11 @@ func (n *Node) WaitLinkToDisappear(linkName string, interval time.Duration, dead
 	if err == nil {
 		return nil
 	}
-	if framework.IsTimeout(err) {
-		return framework.TimeoutError(fmt.Sprintf("timed out while waiting for link %s in node %s to disappear", linkName, n.Name()))
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		framework.Failf("timed out while waiting for link %s in node %s to disappear", linkName, n.Name())
 	}
+	framework.Failf("error occurred while waiting for link %s in node %s to disappear: %v", linkName, n.Name(), err)
 
 	return err
 }
@@ -169,7 +117,7 @@ func ListClusters() ([]string, error) {
 
 	var clusters []string
 	for _, node := range nodeList {
-		if cluster := node.Labels[labelCluster]; !util.ContainsString(clusters, cluster) {
+		if cluster := node.Labels[labelCluster]; !slices.Contains(clusters, cluster) {
 			clusters = append(clusters, node.Labels[labelCluster])
 		}
 	}

@@ -6,15 +6,17 @@ import (
 	"math"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
-	goping "github.com/oilbeater/go-ping"
+	goping "github.com/prometheus-community/pro-bing"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
+	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
@@ -49,7 +51,7 @@ func StartPinger(config *Configuration, e *Exporter) {
 
 func ping(config *Configuration) error {
 	errHappens := false
-	if checkApiServer(config) != nil {
+	if checkAPIServer(config) != nil {
 		errHappens = true
 	}
 	if pingPods(config) != nil {
@@ -64,6 +66,12 @@ func ping(config *Configuration) error {
 
 	if config.ExternalDNS != "" {
 		if externalNslookup(config) != nil {
+			errHappens = true
+		}
+	}
+
+	if config.TargetIPPorts != "" {
+		if checkAccessTargetIPPorts(config) != nil {
 			errHappens = true
 		}
 	}
@@ -90,8 +98,23 @@ func pingNodes(config *Configuration) error {
 	var pingErr error
 	for _, no := range nodes.Items {
 		for _, addr := range no.Status.Addresses {
-			if addr.Type == v1.NodeInternalIP && util.ContainsString(config.PodProtocols, util.CheckProtocol(addr.Address)) {
+			if addr.Type == v1.NodeInternalIP && slices.Contains(config.PodProtocols, util.CheckProtocol(addr.Address)) {
 				func(nodeIP, nodeName string) {
+					if config.EnableVerboseConnCheck {
+						if err := util.TCPConnectivityCheck(fmt.Sprintf("%s:%d", nodeIP, config.TCPConnCheckPort)); err != nil {
+							klog.Infof("TCP connectivity to node %s %s failed", nodeName, nodeIP)
+							pingErr = err
+						} else {
+							klog.Infof("TCP connectivity to node %s %s success", nodeName, nodeIP)
+						}
+						if err := util.UDPConnectivityCheck(fmt.Sprintf("%s:%d", nodeIP, config.UDPConnCheckPort)); err != nil {
+							klog.Infof("UDP connectivity to node %s %s failed", nodeName, nodeIP)
+							pingErr = err
+						} else {
+							klog.Infof("UDP connectivity to node %s %s success", nodeName, nodeIP)
+						}
+					}
+
 					pinger, err := goping.NewPinger(nodeIP)
 					if err != nil {
 						klog.Errorf("failed to init pinger, %v", err)
@@ -103,7 +126,12 @@ func pingNodes(config *Configuration) error {
 					pinger.Count = 3
 					pinger.Interval = 100 * time.Millisecond
 					pinger.Debug = true
-					pinger.Run()
+					if err = pinger.Run(); err != nil {
+						klog.Errorf("failed to run pinger for destination %s: %v", nodeIP, err)
+						pingErr = err
+						return
+					}
+
 					stats := pinger.Statistics()
 					klog.Infof("ping node: %s %s, count: %d, loss count %d, average rtt %.2fms",
 						nodeName, nodeIP, pinger.Count, int(math.Abs(float64(stats.PacketsSent-stats.PacketsRecv))), float64(stats.AvgRtt)/float64(time.Millisecond))
@@ -141,9 +169,25 @@ func pingPods(config *Configuration) error {
 	var pingErr error
 	for _, pod := range pods.Items {
 		for _, podIP := range pod.Status.PodIPs {
-			if util.ContainsString(config.PodProtocols, util.CheckProtocol(podIP.IP)) {
-				func(podIp, podName, nodeIP, nodeName string) {
-					pinger, err := goping.NewPinger(podIp)
+			if slices.Contains(config.PodProtocols, util.CheckProtocol(podIP.IP)) {
+				func(podIP, podName, nodeIP, nodeName string) {
+					if config.EnableVerboseConnCheck {
+						if err := util.TCPConnectivityCheck(fmt.Sprintf("%s:%d", podIP, config.TCPConnCheckPort)); err != nil {
+							klog.Infof("TCP connectivity to pod %s %s failed", podName, podIP)
+							pingErr = err
+						} else {
+							klog.Infof("TCP connectivity to pod %s %s success", podName, podIP)
+						}
+
+						if err := util.UDPConnectivityCheck(fmt.Sprintf("%s:%d", podIP, config.UDPConnCheckPort)); err != nil {
+							klog.Infof("UDP connectivity to pod %s %s failed", podName, podIP)
+							pingErr = err
+						} else {
+							klog.Infof("UDP connectivity to pod %s %s success", podName, podIP)
+						}
+					}
+
+					pinger, err := goping.NewPinger(podIP)
 					if err != nil {
 						klog.Errorf("failed to init pinger, %v", err)
 						pingErr = err
@@ -153,11 +197,16 @@ func pingPods(config *Configuration) error {
 					pinger.Timeout = 1 * time.Second
 					pinger.Debug = true
 					pinger.Count = 3
-					pinger.Interval = 1 * time.Millisecond
-					pinger.Run()
+					pinger.Interval = 100 * time.Millisecond
+					if err = pinger.Run(); err != nil {
+						klog.Errorf("failed to run pinger for destination %s: %v", podIP, err)
+						pingErr = err
+						return
+					}
+
 					stats := pinger.Statistics()
 					klog.Infof("ping pod: %s %s, count: %d, loss count %d, average rtt %.2fms",
-						podName, podIp, pinger.Count, int(math.Abs(float64(stats.PacketsSent-stats.PacketsRecv))), float64(stats.AvgRtt)/float64(time.Millisecond))
+						podName, podIP, pinger.Count, int(math.Abs(float64(stats.PacketsSent-stats.PacketsRecv))), float64(stats.AvgRtt)/float64(time.Millisecond))
 					if int(math.Abs(float64(stats.PacketsSent-stats.PacketsRecv))) != 0 {
 						pingErr = fmt.Errorf("ping failed")
 					}
@@ -167,7 +216,7 @@ func pingPods(config *Configuration) error {
 						config.PodName,
 						nodeName,
 						nodeIP,
-						podIp,
+						podIP,
 						float64(stats.AvgRtt)/float64(time.Millisecond),
 						int(math.Abs(float64(stats.PacketsSent-stats.PacketsRecv))),
 						int(float64(stats.PacketsSent)))
@@ -185,7 +234,7 @@ func pingExternal(config *Configuration) error {
 
 	addresses := strings.Split(config.ExternalAddress, ",")
 	for _, addr := range addresses {
-		if !util.ContainsString(config.PodProtocols, util.CheckProtocol(addr)) {
+		if !slices.Contains(config.PodProtocols, util.CheckProtocol(addr)) {
 			continue
 		}
 
@@ -199,8 +248,11 @@ func pingExternal(config *Configuration) error {
 		pinger.Timeout = 5 * time.Second
 		pinger.Debug = true
 		pinger.Count = 3
-		pinger.Interval = 1 * time.Millisecond
-		pinger.Run()
+		pinger.Interval = 100 * time.Millisecond
+		if err = pinger.Run(); err != nil {
+			klog.Errorf("failed to run pinger for destination %s: %v", addr, err)
+			return err
+		}
 		stats := pinger.Statistics()
 		klog.Infof("ping external address: %s, total count: %d, loss count %d, average rtt %.2fms",
 			addr, pinger.Count, int(math.Abs(float64(stats.PacketsSent-stats.PacketsRecv))), float64(stats.AvgRtt)/float64(time.Millisecond))
@@ -219,6 +271,54 @@ func pingExternal(config *Configuration) error {
 	return nil
 }
 
+func checkAccessTargetIPPorts(config *Configuration) error {
+	klog.Infof("start to check Service or externalIPPort connectivity")
+	if config.TargetIPPorts == "" {
+		return nil
+	}
+	var checkErr error
+	targetIPPorts := strings.Split(config.TargetIPPorts, ",")
+	for _, targetIPPort := range targetIPPorts {
+		klog.Infof("checking targetIPPort %s", targetIPPort)
+		items := strings.Split(targetIPPort, "-")
+		if len(items) != 3 {
+			klog.Infof("targetIPPort format failed")
+			continue
+		}
+		proto := items[0]
+		addr := items[1]
+		port := items[2]
+
+		if !slices.Contains(config.PodProtocols, util.CheckProtocol(addr)) {
+			continue
+		}
+		if util.CheckProtocol(addr) == kubeovnv1.ProtocolIPv6 {
+			addr = fmt.Sprintf("[%s]", addr)
+		}
+
+		switch proto {
+		case util.ProtocolTCP:
+			if err := util.TCPConnectivityCheck(fmt.Sprintf("%s:%s", addr, port)); err != nil {
+				klog.Infof("TCP connectivity to targetIPPort %s:%s failed", addr, port)
+				checkErr = err
+			} else {
+				klog.Infof("TCP connectivity to targetIPPort %s:%s success", addr, port)
+			}
+		case util.ProtocolUDP:
+			if err := util.UDPConnectivityCheck(fmt.Sprintf("%s:%s", addr, port)); err != nil {
+				klog.Infof("UDP connectivity to target %s:%s failed", addr, port)
+				checkErr = err
+			} else {
+				klog.Infof("UDP connectivity to target %s:%s success", addr, port)
+			}
+		default:
+			klog.Infof("unrecognized protocol %s", proto)
+			continue
+		}
+	}
+	return checkErr
+}
+
 func internalNslookup(config *Configuration) error {
 	klog.Infof("start to check dns connectivity")
 	t1 := time.Now()
@@ -229,10 +329,10 @@ func internalNslookup(config *Configuration) error {
 	elapsed := time.Since(t1)
 	if err != nil {
 		klog.Errorf("failed to resolve dns %s, %v", config.InternalDNS, err)
-		SetInternalDnsUnhealthyMetrics(config.NodeName)
+		SetInternalDNSUnhealthyMetrics(config.NodeName)
 		return err
 	}
-	SetInternalDnsHealthyMetrics(config.NodeName, float64(elapsed)/float64(time.Millisecond))
+	SetInternalDNSHealthyMetrics(config.NodeName, float64(elapsed)/float64(time.Millisecond))
 	klog.Infof("resolve dns %s to %v in %.2fms", config.InternalDNS, addrs, float64(elapsed)/float64(time.Millisecond))
 	return nil
 }
@@ -247,15 +347,15 @@ func externalNslookup(config *Configuration) error {
 	elapsed := time.Since(t1)
 	if err != nil {
 		klog.Errorf("failed to resolve dns %s, %v", config.ExternalDNS, err)
-		SetExternalDnsUnhealthyMetrics(config.NodeName)
+		SetExternalDNSUnhealthyMetrics(config.NodeName)
 		return err
 	}
-	SetExternalDnsHealthyMetrics(config.NodeName, float64(elapsed)/float64(time.Millisecond))
+	SetExternalDNSHealthyMetrics(config.NodeName, float64(elapsed)/float64(time.Millisecond))
 	klog.Infof("resolve dns %s to %v in %.2fms", config.ExternalDNS, addrs, float64(elapsed)/float64(time.Millisecond))
 	return nil
 }
 
-func checkApiServer(config *Configuration) error {
+func checkAPIServer(config *Configuration) error {
 	klog.Infof("start to check apiserver connectivity")
 	t1 := time.Now()
 	_, err := config.KubeClient.Discovery().ServerVersion()

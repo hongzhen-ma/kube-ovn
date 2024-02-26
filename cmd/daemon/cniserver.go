@@ -18,9 +18,9 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/sample-controller/pkg/signals"
 
-	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	kubeovninformer "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions"
 	"github.com/kubeovn/kube-ovn/pkg/daemon"
+	"github.com/kubeovn/kube-ovn/pkg/ovs"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 	"github.com/kubeovn/kube-ovn/versions"
 )
@@ -34,9 +34,7 @@ func CmdMain() {
 	config := daemon.ParseFlags()
 	klog.Infof(versions.String())
 
-	if err := initForOS(); err != nil {
-		util.LogFatalAndExit(err, "failed to do the OS initialization")
-	}
+	ovs.UpdateOVSVsctlLimiter(config.OVSVsctlConcurrency)
 
 	nicBridgeMappings, err := daemon.InitOVSBridges()
 	if err != nil {
@@ -47,7 +45,7 @@ func CmdMain() {
 		util.LogFatalAndExit(err, "failed to initialize config")
 	}
 
-	if err := Retry(util.ChasRetryTime, util.ChasRetryIntev, initChassisAnno, config); err != nil {
+	if err := Retry(util.ChassisRetryMaxTimes, util.ChassisCniDaemonRetryInterval, initChassisAnno, config); err != nil {
 		util.LogFatalAndExit(err, "failed to initialize ovn chassis annotation")
 	}
 
@@ -59,7 +57,11 @@ func CmdMain() {
 		util.LogFatalAndExit(err, "failed to initialize node gateway")
 	}
 
-	stopCh := signals.SetupSignalHandler()
+	if err := initForOS(); err != nil {
+		util.LogFatalAndExit(err, "failed to do the OS initialization")
+	}
+
+	stopCh := signals.SetupSignalHandler().Done()
 	podInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(config.KubeClient, 0,
 		kubeinformers.WithTweakListOptions(func(listOption *v1.ListOptions) {
 			listOption.FieldSelector = fmt.Sprintf("spec.nodeName=%s", config.NodeName)
@@ -73,13 +75,10 @@ func CmdMain() {
 		kubeovninformer.WithTweakListOptions(func(listOption *v1.ListOptions) {
 			listOption.AllowWatchBookmarks = true
 		}))
-	ctl, err := daemon.NewController(config, podInformerFactory, nodeInformerFactory, kubeovnInformerFactory)
+	ctl, err := daemon.NewController(config, stopCh, podInformerFactory, nodeInformerFactory, kubeovnInformerFactory)
 	if err != nil {
 		util.LogFatalAndExit(err, "failed to create controller")
 	}
-	podInformerFactory.Start(stopCh)
-	nodeInformerFactory.Start(stopCh)
-	kubeovnInformerFactory.Start(stopCh)
 	klog.Info("start daemon controller")
 	go ctl.Run(stopCh)
 	go daemon.RunServer(config, ctl)
@@ -99,19 +98,24 @@ func CmdMain() {
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
 
-	addr := "0.0.0.0"
-	if os.Getenv("ENABLE_BIND_LOCAL_IP") == "true" {
-		podIpsEnv := os.Getenv("POD_IPS")
-		podIps := strings.Split(podIpsEnv, ",")
-		// when pod in dual mode, golang can't support bind v4 and v6 address in the same time,
-		// so not support bind local ip when in dual mode
-		if len(podIps) == 1 {
-			addr = podIps[0]
-			if util.CheckProtocol(podIps[0]) == kubeovnv1.ProtocolIPv6 {
-				addr = fmt.Sprintf("[%s]", podIps[0])
+	addr := util.GetDefaultListenAddr()
+
+	if config.EnableVerboseConnCheck {
+		go func() {
+			connListenaddr := fmt.Sprintf("%s:%d", addr, config.TCPConnCheckPort)
+			if err := util.TCPConnectivityListen(connListenaddr); err != nil {
+				util.LogFatalAndExit(err, "failed to start TCP listen on addr %s", addr)
 			}
-		}
+		}()
+
+		go func() {
+			connListenaddr := fmt.Sprintf("%s:%d", addr, config.UDPConnCheckPort)
+			if err := util.UDPConnectivityListen(connListenaddr); err != nil {
+				util.LogFatalAndExit(err, "failed to start UDP listen on addr %s", addr)
+			}
+		}()
 	}
+
 	// conform to Gosec G114
 	// https://github.com/securego/gosec#available-rules
 	server := &http.Server{
@@ -126,14 +130,15 @@ func mvCNIConf(configDir, configFile, confName string) error {
 	// #nosec
 	data, err := os.ReadFile(configFile)
 	if err != nil {
+		klog.Errorf("failed to read cni config file %s, %v", configFile, err)
 		return err
 	}
 
 	cniConfPath := filepath.Join(configDir, confName)
-	return os.WriteFile(cniConfPath, data, 0644)
+	return os.WriteFile(cniConfPath, data, 0o644)
 }
 
-func Retry(attempts int, sleep int, f func(configuration *daemon.Configuration) error, ctrl *daemon.Configuration) (err error) {
+func Retry(attempts, sleep int, f func(configuration *daemon.Configuration) error, ctrl *daemon.Configuration) (err error) {
 	for i := 0; ; i++ {
 		err = f(ctrl)
 		if err == nil {
@@ -162,9 +167,21 @@ func initChassisAnno(cfg *daemon.Configuration) error {
 	}
 
 	chassistr := string(chassisID)
-	node.Annotations[util.ChassisAnnotation] = strings.TrimSpace(chassistr)
-	patchPayloadTemplate :=
-		`[{
+	chassesName := strings.TrimSpace(chassistr)
+	if chassesName == "" {
+		// not ready yet
+		err = fmt.Errorf("chassis id is empty")
+		klog.Error(err)
+		return err
+	}
+	if annoChassesName, ok := node.Annotations[util.ChassisAnnotation]; ok {
+		if annoChassesName == chassesName {
+			return nil
+		}
+		klog.Infof("chassis id changed, old: %s, new: %s", annoChassesName, chassesName)
+	}
+	node.Annotations[util.ChassisAnnotation] = chassesName
+	patchPayloadTemplate := `[{
         "op": "%s",
         "path": "/metadata/annotations",
         "value": %s

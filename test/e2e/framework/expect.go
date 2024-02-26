@@ -30,12 +30,12 @@ var (
 )
 
 // ExpectEqual expects the specified two are the same, otherwise an exception raises
-func ExpectEqual(actual interface{}, extra interface{}, explain ...interface{}) {
+func ExpectEqual(actual, extra interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).To(gomega.Equal(extra), explain...)
 }
 
 // ExpectNotEqual expects the specified two are not the same, otherwise an exception raises
-func ExpectNotEqual(actual interface{}, extra interface{}, explain ...interface{}) {
+func ExpectNotEqual(actual, extra interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).NotTo(gomega.Equal(extra), explain...)
 }
 
@@ -67,7 +67,7 @@ func ExpectNoErrorWithOffset(offset int, err error, explain ...interface{}) {
 		}
 	}
 
-	// This intentionally doesn't use gomega.Expect. Instead we take
+	// This intentionally doesn't use gomega.Expect. Instead，we take
 	// full control over what information is presented where:
 	// - The complete error object is logged because it may contain
 	//   additional information that isn't included in its error
@@ -84,32 +84,42 @@ func ExpectNoErrorWithOffset(offset int, err error, explain ...interface{}) {
 
 // ExpectConsistOf expects actual contains precisely the extra elements.
 // The ordering of the elements does not matter.
-func ExpectConsistOf(actual interface{}, extra interface{}, explain ...interface{}) {
+func ExpectConsistOf(actual, extra interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).To(gomega.ConsistOf(extra), explain...)
 }
 
 // ExpectContainElement expects actual contains the extra elements.
-func ExpectContainElement(actual interface{}, extra interface{}, explain ...interface{}) {
+func ExpectContainElement(actual, extra interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).To(gomega.ContainElement(extra), explain...)
 }
 
 // ExpectNotContainElement expects actual does not contain the extra elements.
-func ExpectNotContainElement(actual interface{}, extra interface{}, explain ...interface{}) {
+func ExpectNotContainElement(actual, extra interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).NotTo(gomega.ContainElement(extra), explain...)
 }
 
+// ExpectContainSubstring expects actual contains the passed-in substring.
+func ExpectContainSubstring(actual, substr string, explain ...interface{}) {
+	gomega.ExpectWithOffset(1, actual).To(gomega.ContainSubstring(substr), explain...)
+}
+
+// ExpectNotContainSubstring expects actual does not contain the passed-in substring.
+func ExpectNotContainSubstring(actual, substr string, explain ...interface{}) {
+	gomega.ExpectWithOffset(1, actual).NotTo(gomega.ContainSubstring(substr), explain...)
+}
+
 // ExpectHaveKey expects the actual map has the key in the keyset
-func ExpectHaveKey(actual interface{}, key interface{}, explain ...interface{}) {
+func ExpectHaveKey(actual, key interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).To(gomega.HaveKey(key), explain...)
 }
 
 // ExpectHaveKeyWithValue expects the actual map has the passed in key/value pair.
-func ExpectHaveKeyWithValue(actual interface{}, key, value interface{}, explain ...interface{}) {
+func ExpectHaveKeyWithValue(actual, key, value interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).To(gomega.HaveKeyWithValue(key, value), explain...)
 }
 
 // ExpectNotHaveKey expects the actual map does not have the key in the keyset
-func ExpectNotHaveKey(actual interface{}, key interface{}, explain ...interface{}) {
+func ExpectNotHaveKey(actual, key interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).NotTo(gomega.HaveKey(key), explain...)
 }
 
@@ -148,7 +158,7 @@ func ExpectFalse(actual interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).NotTo(gomega.BeTrue(), explain...)
 }
 
-// ExpectZero expects actual actual is the zero value for its type or actual is nil.
+// ExpectZero expects actual is the zero value for its type or actual is nil.
 func ExpectZero(actual interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).To(gomega.BeZero(), explain...)
 }
@@ -158,7 +168,7 @@ func ExpectNotZero(actual interface{}, explain ...interface{}) {
 	gomega.ExpectWithOffset(1, actual).NotTo(gomega.BeZero(), explain...)
 }
 
-// ExpectUUID expects that the given string is an UUID.
+// ExpectUUID expects that the given string is a UUID.
 func ExpectUUID(s string) {
 	ginkgo.By("verifying the string " + s + " is an UUID")
 	ExpectTrue(uuidRegex.MatchString(s))

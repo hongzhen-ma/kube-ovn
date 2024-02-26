@@ -2,8 +2,6 @@ package kube_ovn
 
 import (
 	"flag"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"k8s.io/klog/v2"
@@ -22,6 +20,7 @@ import (
 	_ "github.com/kubeovn/kube-ovn/test/e2e/kube-ovn/qos"
 	_ "github.com/kubeovn/kube-ovn/test/e2e/kube-ovn/service"
 	_ "github.com/kubeovn/kube-ovn/test/e2e/kube-ovn/subnet"
+	_ "github.com/kubeovn/kube-ovn/test/e2e/kube-ovn/switch_lb_rule"
 	_ "github.com/kubeovn/kube-ovn/test/e2e/kube-ovn/underlay"
 )
 
@@ -35,10 +34,6 @@ func init() {
 }
 
 func TestE2E(t *testing.T) {
-	if framework.TestContext.KubeConfig == "" {
-		framework.TestContext.KubeConfig = filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	}
 	framework.AfterReadingAllFlags(&framework.TestContext)
-
 	e2e.RunE2ETests(t)
 }

@@ -5,11 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"math/big"
-	"math/rand"
-	"os"
-	"path/filepath"
+	"math/rand/v2"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
 	corev1 "k8s.io/api/core/v1"
@@ -43,11 +43,7 @@ func init() {
 }
 
 func TestE2E(t *testing.T) {
-	if k8sframework.TestContext.KubeConfig == "" {
-		k8sframework.TestContext.KubeConfig = filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	}
 	k8sframework.AfterReadingAllFlags(&k8sframework.TestContext)
-
 	e2e.RunE2ETests(t)
 }
 
@@ -82,7 +78,7 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 
 		if clusterName == "" {
 			ginkgo.By("Getting k8s nodes")
-			k8sNodes, err := e2enode.GetReadySchedulableNodes(cs)
+			k8sNodes, err := e2enode.GetReadySchedulableNodes(context.Background(), cs)
 			framework.ExpectNoError(err)
 
 			cluster, ok := kind.IsKindProvided(k8sNodes.Items[0].Spec.ProviderID)
@@ -111,10 +107,11 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 		excludeIPs := make([]string, 0, len(dockerNetwork.Containers))
 		for _, container := range dockerNetwork.Containers {
 			if container.IPv4Address != "" {
-				excludeIPs = append(excludeIPs, container.IPv4Address)
+				ip, _, _ := net.ParseCIDR(container.IPv4Address)
+				excludeIPs = append(excludeIPs, ip.String())
 			}
 		}
-		subnet := framework.MakeSubnet(subnetName, "", cidr, gateway, excludeIPs, nil, []string{namespaceName})
+		subnet := framework.MakeSubnet(subnetName, "", cidr, gateway, "", "", excludeIPs, nil, []string{namespaceName})
 		subnet.Spec.Provider = subnetProvider
 		_ = subnetClient.Create(subnet)
 	})
@@ -135,7 +132,7 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 			Name:       "tcp",
 			Protocol:   corev1.ProtocolTCP,
 			Port:       80,
-			TargetPort: intstr.FromInt(80),
+			TargetPort: intstr.FromInt32(80),
 		}}
 		annotations := map[string]string{
 			subnetProvider + ".kubernetes.io/logical_switch": subnetName,
@@ -147,11 +144,12 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 		}, "cluster ips are not empty")
 
 		ginkgo.By("Waiting for deployment " + deploymentName + " to be ready")
-		framework.WaitUntil(func() (bool, error) {
-			_, err := deploymentClient.DeploymentInterface.Get(context.TODO(), deploymentName, metav1.GetOptions{})
+		framework.WaitUntil(2*time.Second, time.Minute, func(ctx context.Context) (bool, error) {
+			_, err := deploymentClient.DeploymentInterface.Get(ctx, deploymentName, metav1.GetOptions{})
 			if err == nil {
 				return true, nil
 			}
+			ginkgo.By("deployment " + deploymentName + " still not ready")
 			if k8serrors.IsNotFound(err) {
 				return false, nil
 			}
@@ -170,7 +168,7 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 		key := fmt.Sprintf(util.AllocatedAnnotationTemplate, subnetProvider)
 		framework.ExpectHaveKeyWithValue(pods.Items[0].Annotations, key, "true")
 		cidrKey := fmt.Sprintf(util.CidrAnnotationTemplate, subnetProvider)
-		ipKey := fmt.Sprintf(util.IpAddressAnnotationTemplate, subnetProvider)
+		ipKey := fmt.Sprintf(util.IPAddressAnnotationTemplate, subnetProvider)
 		framework.ExpectHaveKey(pods.Items[0].Annotations, cidrKey)
 		framework.ExpectHaveKey(pods.Items[0].Annotations, ipKey)
 		cidr := pods.Items[0].Annotations[cidrKey]
@@ -178,7 +176,7 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 		framework.ExpectTrue(util.CIDRContainIP(cidr, ip))
 
 		ginkgo.By("Checking service external IP")
-		framework.WaitUntil(func() (bool, error) {
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
 			service = serviceClient.Get(serviceName)
 			return len(service.Status.LoadBalancer.Ingress) != 0, nil
 		}, ".status.loadBalancer.ingress is not empty")
@@ -187,13 +185,13 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 
 	framework.ConformanceIt("should allocate static external IP for service", func() {
 		ginkgo.By("Creating service " + serviceName)
-		base := util.Ip2BigInt(gateway)
-		lbIP := util.BigInt2Ip(base.Add(base, big.NewInt(50+rand.Int63n(50))))
+		base := util.IP2BigInt(gateway)
+		lbIP := util.BigInt2Ip(base.Add(base, big.NewInt(50+rand.Int64N(50))))
 		ports := []corev1.ServicePort{{
 			Name:       "tcp",
 			Protocol:   corev1.ProtocolTCP,
 			Port:       80,
-			TargetPort: intstr.FromInt(80),
+			TargetPort: intstr.FromInt32(80),
 		}}
 		annotations := map[string]string{
 			subnetProvider + ".kubernetes.io/logical_switch": subnetName,
@@ -204,8 +202,8 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 		_ = serviceClient.Create(service)
 
 		ginkgo.By("Waiting for deployment " + deploymentName + " to be ready")
-		framework.WaitUntil(func() (bool, error) {
-			_, err := deploymentClient.DeploymentInterface.Get(context.TODO(), deploymentName, metav1.GetOptions{})
+		framework.WaitUntil(2*time.Second, time.Minute, func(ctx context.Context) (bool, error) {
+			_, err := deploymentClient.DeploymentInterface.Get(ctx, deploymentName, metav1.GetOptions{})
 			if err == nil {
 				return true, nil
 			}
@@ -226,13 +224,13 @@ var _ = framework.SerialDescribe("[group:lb-svc]", func() {
 		ginkgo.By("Checking pod annotations")
 		key := fmt.Sprintf(util.AllocatedAnnotationTemplate, subnetProvider)
 		framework.ExpectHaveKeyWithValue(pods.Items[0].Annotations, key, "true")
-		ipKey := fmt.Sprintf(util.IpAddressAnnotationTemplate, subnetProvider)
+		ipKey := fmt.Sprintf(util.IPAddressAnnotationTemplate, subnetProvider)
 		framework.ExpectHaveKeyWithValue(pods.Items[0].Annotations, ipKey, lbIP)
 		cidr := pods.Items[0].Annotations[fmt.Sprintf(util.CidrAnnotationTemplate, subnetProvider)]
 		framework.ExpectTrue(util.CIDRContainIP(cidr, lbIP))
 
 		ginkgo.By("Checking service external IP")
-		framework.WaitUntil(func() (bool, error) {
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
 			service = serviceClient.Get(serviceName)
 			return len(service.Status.LoadBalancer.Ingress) != 0, nil
 		}, ".status.loadBalancer.ingress is not empty")

@@ -3,16 +3,19 @@ package ovs
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/ovn-org/libovsdb/model"
 	"github.com/ovn-org/libovsdb/ovsdb"
+	"k8s.io/klog/v2"
 
 	"github.com/kubeovn/kube-ovn/pkg/ovsdb/ovnnb"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
 // CreateLogicalRouter create logical router in ovn
-func (c *ovnClient) CreateLogicalRouter(lrName string) error {
+func (c *OVNNbClient) CreateLogicalRouter(lrName string) error {
 	exist, err := c.LogicalRouterExists(lrName)
 	if err != nil {
 		return err
@@ -28,8 +31,9 @@ func (c *ovnClient) CreateLogicalRouter(lrName string) error {
 		ExternalIDs: map[string]string{"vendor": util.CniTypeName},
 	}
 
-	op, err := c.ovnNbClient.Create(lr)
+	op, err := c.ovsDbClient.Create(lr)
 	if err != nil {
+		klog.Error(err)
 		return fmt.Errorf("generate operations for creating logical router %s: %v", lrName, err)
 	}
 
@@ -41,9 +45,10 @@ func (c *ovnClient) CreateLogicalRouter(lrName string) error {
 }
 
 // UpdateLogicalRouter update logical router
-func (c *ovnClient) UpdateLogicalRouter(lr *ovnnb.LogicalRouter, fields ...interface{}) error {
+func (c *OVNNbClient) UpdateLogicalRouter(lr *ovnnb.LogicalRouter, fields ...interface{}) error {
 	op, err := c.UpdateLogicalRouterOp(lr, fields...)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 
@@ -55,9 +60,10 @@ func (c *ovnClient) UpdateLogicalRouter(lr *ovnnb.LogicalRouter, fields ...inter
 }
 
 // DeleteLogicalRouter delete logical router in ovn
-func (c *ovnClient) DeleteLogicalRouter(lrName string) error {
+func (c *OVNNbClient) DeleteLogicalRouter(lrName string) error {
 	lr, err := c.GetLogicalRouter(lrName, true)
 	if err != nil {
+		klog.Error(err)
 		return fmt.Errorf("get logical router %s when delete: %v", lrName, err)
 	}
 
@@ -68,6 +74,7 @@ func (c *ovnClient) DeleteLogicalRouter(lrName string) error {
 
 	op, err := c.Where(lr).Delete()
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 
@@ -78,14 +85,14 @@ func (c *ovnClient) DeleteLogicalRouter(lrName string) error {
 	return nil
 }
 
-// GetLogicalRouter get load balancer by name,
-// it is because of lack name index that does't use ovnNbClient.Get
-func (c *ovnClient) GetLogicalRouter(lrName string, ignoreNotFound bool) (*ovnnb.LogicalRouter, error) {
+// GetLogicalRouter get logical router by name,
+// it is because of lack name index that does't use OVNNbClient.Get
+func (c *OVNNbClient) GetLogicalRouter(lrName string, ignoreNotFound bool) (*ovnnb.LogicalRouter, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
 	lrList := make([]ovnnb.LogicalRouter, 0)
-	if err := c.ovnNbClient.WhereCache(func(lr *ovnnb.LogicalRouter) bool {
+	if err := c.ovsDbClient.WhereCache(func(lr *ovnnb.LogicalRouter) bool {
 		return lr.Name == lrName
 	}).List(ctx, &lrList); err != nil {
 		return nil, fmt.Errorf("list logical router %q: %v", lrName, err)
@@ -103,22 +110,23 @@ func (c *ovnClient) GetLogicalRouter(lrName string, ignoreNotFound bool) (*ovnnb
 		return nil, fmt.Errorf("more than one logical router with same name %q", lrName)
 	}
 
+	// #nosec G602
 	return &lrList[0], nil
 }
 
-func (c *ovnClient) LogicalRouterExists(name string) (bool, error) {
+func (c *OVNNbClient) LogicalRouterExists(name string) (bool, error) {
 	lrp, err := c.GetLogicalRouter(name, true)
 	return lrp != nil, err
 }
 
 // ListLogicalRouter list logical router
-func (c *ovnClient) ListLogicalRouter(needVendorFilter bool, filter func(lr *ovnnb.LogicalRouter) bool) ([]ovnnb.LogicalRouter, error) {
+func (c *OVNNbClient) ListLogicalRouter(needVendorFilter bool, filter func(lr *ovnnb.LogicalRouter) bool) ([]ovnnb.LogicalRouter, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
 	lrList := make([]ovnnb.LogicalRouter, 0)
 
-	if err := c.ovnNbClient.WhereCache(func(lr *ovnnb.LogicalRouter) bool {
+	if err := c.ovsDbClient.WhereCache(func(lr *ovnnb.LogicalRouter) bool {
 		if needVendorFilter && (len(lr.ExternalIDs) == 0 || lr.ExternalIDs["vendor"] != util.CniTypeName) {
 			return false
 		}
@@ -135,14 +143,59 @@ func (c *ovnClient) ListLogicalRouter(needVendorFilter bool, filter func(lr *ovn
 	return lrList, nil
 }
 
+// LogicalRouterUpdateLoadBalancers add several lb to or from logical router once
+func (c *OVNNbClient) LogicalRouterUpdateLoadBalancers(lrName string, op ovsdb.Mutator, lbNames ...string) error {
+	if len(lbNames) == 0 {
+		return nil
+	}
+
+	lbUUIDs := make([]string, 0, len(lbNames))
+
+	for _, lbName := range lbNames {
+		lb, err := c.GetLoadBalancer(lbName, true)
+		if err != nil {
+			klog.Error(err)
+			return err
+		}
+
+		// ignore non-existent object
+		if lb != nil {
+			lbUUIDs = append(lbUUIDs, lb.UUID)
+		}
+	}
+
+	mutation := func(lr *ovnnb.LogicalRouter) *model.Mutation {
+		mutation := &model.Mutation{
+			Field:   &lr.LoadBalancer,
+			Value:   lbUUIDs,
+			Mutator: op,
+		}
+
+		return mutation
+	}
+
+	ops, err := c.LogicalRouterOp(lrName, mutation)
+	if err != nil {
+		klog.Error(err)
+		return fmt.Errorf("generate operations for logical router %s update lbs %v: %v", lrName, lbNames, err)
+	}
+
+	if err := c.Transact("lr-lb-update", ops); err != nil {
+		return fmt.Errorf("logical router %s update lbs %v: %v", lrName, lbNames, err)
+	}
+
+	return nil
+}
+
 // UpdateLogicalRouterOp generate operations which update logical router
-func (c *ovnClient) UpdateLogicalRouterOp(lr *ovnnb.LogicalRouter, fields ...interface{}) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) UpdateLogicalRouterOp(lr *ovnnb.LogicalRouter, fields ...interface{}) ([]ovsdb.Operation, error) {
 	if lr == nil {
 		return nil, fmt.Errorf("logical_router is nil")
 	}
 
-	op, err := c.ovnNbClient.Where(lr).Update(lr, fields...)
+	op, err := c.ovsDbClient.Where(lr).Update(lr, fields...)
 	if err != nil {
+		klog.Error(err)
 		return nil, fmt.Errorf("generate operations for updating logical router %s: %v", lr.Name, err)
 	}
 
@@ -150,9 +203,34 @@ func (c *ovnClient) UpdateLogicalRouterOp(lr *ovnnb.LogicalRouter, fields ...int
 }
 
 // LogicalRouterUpdatePortOp create operations add to or delete port from logical router
-func (c *ovnClient) LogicalRouterUpdatePortOp(lrName, lrpUUID string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) LogicalRouterUpdatePortOp(lrName, lrpUUID string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
 	if len(lrpUUID) == 0 {
 		return nil, nil
+	}
+
+	if lrName == "" && op == ovsdb.MutateOperationDelete {
+		lrList, err := c.ListLogicalRouter(false, func(lr *ovnnb.LogicalRouter) bool {
+			return slices.Contains(lr.Ports, lrpUUID)
+		})
+		if err != nil {
+			klog.Error(err)
+			return nil, fmt.Errorf("failed to list LR by LRP UUID %s: %v", lrpUUID, err)
+		}
+		if len(lrList) == 0 {
+			err = fmt.Errorf("no LR found for LRP %s", lrpUUID)
+			klog.Error(err)
+			return nil, err
+		}
+		if len(lrList) != 1 {
+			lrNames := make([]string, len(lrList))
+			for i := range lrList {
+				lrNames[i] = lrList[i].Name
+			}
+			err = fmt.Errorf("multiple LR found for LRP %s: %s", lrpUUID, strings.Join(lrNames, ", "))
+			klog.Error(err)
+			return nil, err
+		}
+		lrName = lrList[0].Name
 	}
 
 	mutation := func(lr *ovnnb.LogicalRouter) *model.Mutation {
@@ -169,7 +247,7 @@ func (c *ovnClient) LogicalRouterUpdatePortOp(lrName, lrpUUID string, op ovsdb.M
 }
 
 // LogicalRouterUpdatePolicyOp create operations add to or delete policy from logical router
-func (c *ovnClient) LogicalRouterUpdatePolicyOp(lrName string, policyUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) LogicalRouterUpdatePolicyOp(lrName string, policyUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
 	if len(policyUUIDs) == 0 {
 		return nil, nil
 	}
@@ -188,7 +266,7 @@ func (c *ovnClient) LogicalRouterUpdatePolicyOp(lrName string, policyUUIDs []str
 }
 
 // LogicalRouterUpdateNatOp create operations add to or delete nat rule from logical router
-func (c *ovnClient) LogicalRouterUpdateNatOp(lrName string, natUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) LogicalRouterUpdateNatOp(lrName string, natUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
 	if len(natUUIDs) == 0 {
 		return nil, nil
 	}
@@ -207,7 +285,7 @@ func (c *ovnClient) LogicalRouterUpdateNatOp(lrName string, natUUIDs []string, o
 }
 
 // LogicalRouterUpdateStaticRouteOp create operations add to or delete static route from logical router
-func (c *ovnClient) LogicalRouterUpdateStaticRouteOp(lrName string, routeUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) LogicalRouterUpdateStaticRouteOp(lrName string, routeUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
 	if len(routeUUIDs) == 0 {
 		return nil, nil
 	}
@@ -226,9 +304,10 @@ func (c *ovnClient) LogicalRouterUpdateStaticRouteOp(lrName string, routeUUIDs [
 }
 
 // LogicalRouterOp create operations about logical router
-func (c *ovnClient) LogicalRouterOp(lrName string, mutationsFunc ...func(lr *ovnnb.LogicalRouter) *model.Mutation) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) LogicalRouterOp(lrName string, mutationsFunc ...func(lr *ovnnb.LogicalRouter) *model.Mutation) ([]ovsdb.Operation, error) {
 	lr, err := c.GetLogicalRouter(lrName, false)
 	if err != nil {
+		klog.Error(err)
 		return nil, fmt.Errorf("get logical router %s: %v", lrName, err)
 	}
 
@@ -246,8 +325,9 @@ func (c *ovnClient) LogicalRouterOp(lrName string, mutationsFunc ...func(lr *ovn
 		}
 	}
 
-	ops, err := c.ovnNbClient.Where(lr).Mutate(lr, mutations...)
+	ops, err := c.ovsDbClient.Where(lr).Mutate(lr, mutations...)
 	if err != nil {
+		klog.Error(err)
 		return nil, fmt.Errorf("generate operations for mutating logical router %s: %v", lrName, err)
 	}
 

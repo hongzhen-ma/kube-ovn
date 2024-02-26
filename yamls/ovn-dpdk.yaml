@@ -18,6 +18,7 @@ rules:
       - vpcs
       - vpcs/status
       - vpc-nat-gateways
+      - vpc-nat-gateways/status
       - subnets
       - subnets/status
       - ips
@@ -41,6 +42,8 @@ rules:
       - switch-lb-rules/status
       - vpc-dnses
       - vpc-dnses/status
+      - qos-policies
+      - qos-policies/status
     verbs:
       - "*"
   - apiGroups:
@@ -201,9 +204,10 @@ spec:
       hostNetwork: true
       containers:
         - name: ovn-central
-          image: "kubeovn/kube-ovn:v1.10.0"
+          image: "kubeovn/kube-ovn:v1.13.0"
           imagePullPolicy: IfNotPresent
-          command: ["/kube-ovn/start-db.sh"]
+          command: 
+          - /kube-ovn/start-db.sh
           securityContext:
             capabilities:
               add: ["SYS_NICE"]
@@ -228,6 +232,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIPs
+            - name: PROBE_INTERVAL
+              value: "180000"
+            - name: OVN_LEADER_PROBE_INTERVAL
+              value: "5"
+            - name: OVN_NORTHD_N_THREADS
+              value: "1"
+            - name: ENABLE_COMPACT
+              value: "false"
           resources:
             requests:
               cpu: 500m
@@ -307,13 +319,16 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: ovs
+      app: ovs-dpdk
   updateStrategy:
-    type: OnDelete
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
-        app: ovs
+        app: ovs-dpdk
         component: network
         type: infra
     spec:
@@ -351,6 +366,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: OVN_REMOTE_PROBE_INTERVAL
+              value: "{{ .Values.networking.OVN_REMOTE_PROBE_INTERVAL }}"
+            - name: OVN_REMOTE_OPENFLOW_INTERVAL
+              value: "{{ .Values.networking.OVN_REMOTE_OPENFLOW_INTERVAL }}"
           volumeMounts:
             - mountPath: /lib/modules
               name: host-modules
@@ -362,8 +381,6 @@ spec:
             - mountPath: /sys
               name: host-sys
               readOnly: true
-            - mountPath: /etc/cni/net.d
-              name: cni-conf
             - mountPath: /etc/openvswitch
               name: host-config-openvswitch
             - mountPath: /etc/ovn
@@ -415,9 +432,6 @@ spec:
         - name: host-sys
           hostPath:
             path: /sys
-        - name: cni-conf
-          hostPath:
-            path: /etc/cni/net.d
         - name: host-config-openvswitch
           hostPath:
             path: /etc/origin/openvswitch

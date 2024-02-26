@@ -15,17 +15,13 @@ import (
 )
 
 // createLogicalRouter delete logical router in ovn
-func createLogicalRouter(c *ovnClient, lr *ovnnb.LogicalRouter) error {
-	op, err := c.ovnNbClient.Create(lr)
+func createLogicalRouter(c *OVNNbClient, lr *ovnnb.LogicalRouter) error {
+	op, err := c.ovsDbClient.Create(lr)
 	if err != nil {
 		return err
 	}
 
-	if err := c.Transact("lr-add", op); err != nil {
-		return err
-	}
-
-	return nil
+	return c.Transact("lr-add", op)
 }
 
 func (suite *OvnClientTestSuite) testCreateLogicalRouter() {
@@ -51,7 +47,6 @@ func (suite *OvnClientTestSuite) testUpdateLogicalRouter() {
 
 	ovnClient := suite.ovnClient
 	lrName := "test-update-lr"
-	policies := []string{ovsclient.NamedUUID(), ovsclient.NamedUUID()}
 
 	err := ovnClient.CreateLogicalRouter(lrName)
 	require.NoError(t, err)
@@ -59,26 +54,25 @@ func (suite *OvnClientTestSuite) testUpdateLogicalRouter() {
 	lr, err := ovnClient.GetLogicalRouter(lrName, false)
 	require.NoError(t, err)
 
-	t.Run("update policy", func(t *testing.T) {
-		lr.Policies = policies
-
+	t.Run("update external-ids", func(t *testing.T) {
+		lr.ExternalIDs = map[string]string{"foo": "bar"}
 		err = ovnClient.UpdateLogicalRouter(lr)
 		require.NoError(t, err)
 
 		lr, err := ovnClient.GetLogicalRouter(lrName, false)
 		require.NoError(t, err)
-		require.ElementsMatch(t, lr.Policies, policies)
+		require.Equal(t, map[string]string{"foo": "bar"}, lr.ExternalIDs)
 	})
 
-	t.Run("clear policy", func(t *testing.T) {
-		lr.Policies = nil
+	t.Run("clear external-ids", func(t *testing.T) {
+		lr.ExternalIDs = nil
 
-		err = ovnClient.UpdateLogicalRouter(lr, &lr.Policies)
+		err = ovnClient.UpdateLogicalRouter(lr, &lr.ExternalIDs)
 		require.NoError(t, err)
 
 		lr, err := ovnClient.GetLogicalRouter(lrName, false)
 		require.NoError(t, err)
-		require.Empty(t, lr.Policies)
+		require.Empty(t, lr.ExternalIDs)
 	})
 }
 
@@ -206,6 +200,72 @@ func (suite *OvnClientTestSuite) testListLogicalRouter() {
 			}
 		}
 		require.Equal(t, count, 4)
+	})
+}
+
+func (suite *OvnClientTestSuite) testLogicalRouterUpdateLoadBalancers() {
+	t := suite.T()
+	t.Parallel()
+
+	ovnClient := suite.ovnClient
+	lrName := "test-add-lb-to-lr"
+	prefix := "test-add-lr-lb"
+	lbNames := make([]string, 0, 3)
+
+	err := ovnClient.CreateLogicalRouter(lrName)
+	require.NoError(t, err)
+
+	for i := 1; i <= 3; i++ {
+		lbName := fmt.Sprintf("%s-%d", prefix, i)
+		lbNames = append(lbNames, lbName)
+		err := ovnClient.CreateLoadBalancer(lbName, "tcp", "")
+		require.NoError(t, err)
+	}
+
+	t.Run("add lbs to logical router", func(t *testing.T) {
+		err = ovnClient.LogicalRouterUpdateLoadBalancers(lrName, ovsdb.MutateOperationInsert, lbNames...)
+		require.NoError(t, err)
+
+		ls, err := ovnClient.GetLogicalRouter(lrName, false)
+		require.NoError(t, err)
+
+		for _, lbName := range lbNames {
+			lb, err := ovnClient.GetLoadBalancer(lbName, false)
+			require.NoError(t, err)
+			require.Contains(t, ls.LoadBalancer, lb.UUID)
+		}
+	})
+
+	t.Run("should no err when add non-existent lbs to logical router", func(t *testing.T) {
+		// add a non-existent lb
+		err = ovnClient.LogicalSwitchUpdateLoadBalancers(lrName, ovsdb.MutateOperationInsert, "test-add-lb-non-existent")
+		require.NoError(t, err)
+	})
+
+	t.Run("del lbs from logical router", func(t *testing.T) {
+		// delete the first two lbs from logical switch
+		err = ovnClient.LogicalRouterUpdateLoadBalancers(lrName, ovsdb.MutateOperationDelete, lbNames[0:2]...)
+		require.NoError(t, err)
+
+		ls, err := ovnClient.GetLogicalRouter(lrName, false)
+		require.NoError(t, err)
+
+		for i, lbName := range lbNames {
+			lb, err := ovnClient.GetLoadBalancer(lbName, false)
+			require.NoError(t, err)
+
+			// logical switch contains the last lb
+			if i == 2 {
+				require.Contains(t, ls.LoadBalancer, lb.UUID)
+				continue
+			}
+			require.NotContains(t, ls.LoadBalancer, lb.UUID)
+		}
+	})
+
+	t.Run("del non-existent lbs from logical router", func(t *testing.T) {
+		err = ovnClient.LogicalRouterUpdateLoadBalancers(lrName, ovsdb.MutateOperationDelete, []string{"test-del-lb-non-existent", "test-del-lb-non-existent-1"}...)
+		require.NoError(t, err)
 	})
 }
 

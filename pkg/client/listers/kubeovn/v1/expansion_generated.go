@@ -22,6 +22,10 @@ package v1
 // IPLister.
 type IPListerExpansion interface{}
 
+// IPPoolListerExpansion allows custom methods to be added to
+// IPPoolLister.
+type IPPoolListerExpansion interface{}
+
 // IptablesDnatRuleListerExpansion allows custom methods to be added to
 // IptablesDnatRuleLister.
 type IptablesDnatRuleListerExpansion interface{}
@@ -38,6 +42,10 @@ type IptablesFIPRuleListerExpansion interface{}
 // IptablesSnatRuleLister.
 type IptablesSnatRuleListerExpansion interface{}
 
+// OvnDnatRuleListerExpansion allows custom methods to be added to
+// OvnDnatRuleLister.
+type OvnDnatRuleListerExpansion interface{}
+
 // OvnEipListerExpansion allows custom methods to be added to
 // OvnEipLister.
 type OvnEipListerExpansion interface{}
@@ -53,6 +61,10 @@ type OvnSnatRuleListerExpansion interface{}
 // ProviderNetworkListerExpansion allows custom methods to be added to
 // ProviderNetworkLister.
 type ProviderNetworkListerExpansion interface{}
+
+// QoSPolicyListerExpansion allows custom methods to be added to
+// QoSPolicyLister.
+type QoSPolicyListerExpansion interface{}
 
 // SecurityGroupListerExpansion allows custom methods to be added to
 // SecurityGroupLister.

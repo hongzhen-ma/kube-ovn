@@ -18,15 +18,15 @@ import (
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
-func (csh cniServerHandler) configureDpdkNic(podName, podNamespace, provider, netns, containerID, ifName, mac string, mtu int, ip, gateway, ingress, egress, sharedDir, socketName string) error {
+func (csh cniServerHandler) configureDpdkNic(podName, podNamespace, provider, netns, containerID, ifName, mac string, mtu int, ip, gateway, ingress, egress, sharedDir, socketName, socketConsumption string) error {
 	return errors.New("DPDK is not supported on Windows")
 }
 
 func (csh cniServerHandler) configureNicWithInternalPort(podName, podNamespace, provider, netns, containerID, ifName, mac string, mtu int, ip, gateway string, isDefaultRoute, detectIPConflict bool, routes []request.Route, dnsServer, dnsSuffix []string, ingress, egress, DeviceID, nicType, latency, limit, loss, jitter string, gwCheckMode int, u2oInterconnectionIP string) (string, error) {
-	return ifName, csh.configureNic(podName, podNamespace, provider, netns, containerID, "", ifName, mac, mtu, ip, gateway, isDefaultRoute, detectIPConflict, routes, dnsServer, dnsSuffix, ingress, egress, DeviceID, nicType, latency, limit, loss, jitter, gwCheckMode, u2oInterconnectionIP)
+	return ifName, csh.configureNic(podName, podNamespace, provider, netns, containerID, "", ifName, mac, mtu, ip, gateway, isDefaultRoute, detectIPConflict, routes, dnsServer, dnsSuffix, ingress, egress, DeviceID, nicType, latency, limit, loss, jitter, gwCheckMode, u2oInterconnectionIP, "")
 }
 
-func (csh cniServerHandler) configureNic(podName, podNamespace, provider, netns, containerID, vfDriver, ifName, mac string, mtu int, ip, gateway string, isDefaultRoute, detectIPConflict bool, routes []request.Route, dnsServer, dnsSuffix []string, ingress, egress, DeviceID, nicType, latency, limit, loss, jitter string, gwCheckMode int, u2oInterconnectionIP string) error {
+func (csh cniServerHandler) configureNic(podName, podNamespace, provider, netns, containerID, vfDriver, ifName, mac string, mtu int, ip, gateway string, isDefaultRoute, detectIPConflict bool, routes []request.Route, dnsServer, dnsSuffix []string, ingress, egress, DeviceID, nicType, latency, limit, loss, jitter string, gwCheckMode int, u2oInterconnectionIP, _ string) error {
 	if DeviceID != "" {
 		return errors.New("SR-IOV is not supported on Windows")
 	}
@@ -47,7 +47,7 @@ func (csh cniServerHandler) configureNic(podName, podNamespace, provider, netns,
 		return err
 	}
 
-	ipAddr := util.GetIpWithoutMask(ip)
+	ipAddr := util.GetIPWithoutMask(ip)
 	sandbox := hns.GetSandboxContainerID(containerID, netns)
 	epName := sandbox[:12]
 	_, err = hns.AddHnsEndpoint(epName, hnsNetwork.Id, containerID, netns, func() (*hcsshim.HNSEndpoint, error) {
@@ -125,6 +125,7 @@ func (csh cniServerHandler) configureNic(podName, podNamespace, provider, netns,
 		}
 
 		if err = ovs.SetInterfaceBandwidth(podName, podNamespace, ifaceID, egress, ingress); err != nil {
+			klog.Error(err)
 			return err
 		}
 
@@ -207,11 +208,13 @@ func configureNic(name, ip string, mac net.HardwareAddr, mtu int) error {
 
 	for addr := range addrToDel {
 		if err = util.RemoveNetIPAddress(adapter.InterfaceIndex, addr); err != nil {
+			klog.Error(err)
 			return err
 		}
 	}
 	for addr := range addrToAdd {
 		if err = util.NewNetIPAddress(adapter.InterfaceIndex, addr); err != nil {
+			klog.Error(err)
 			return err
 		}
 	}
@@ -219,7 +222,7 @@ func configureNic(name, ip string, mac net.HardwareAddr, mtu int) error {
 	return nil
 }
 
-func (csh cniServerHandler) deleteNic(podName, podNamespace, containerID, netns, deviceID, ifName, nicType string) error {
+func (csh cniServerHandler) deleteNic(podName, podNamespace, containerID, netns, deviceID, ifName, nicType, _ string) error {
 	epName := hns.ConstructEndpointName(containerID, netns, util.HnsNetwork)[:12]
 	// remove ovs port
 	output, err := ovs.Exec(ovs.IfExists, "--with-iface", "del-port", "br-int", epName)
@@ -242,7 +245,9 @@ func waitNetworkReady(nic, ipAddr, gateway string, underlayGateway, verbose bool
 	for i, gw := range strings.Split(gateway, ",") {
 		src := strings.Split(ips[i], "/")[0]
 		if !underlayGateway || util.CheckProtocol(gw) == kubeovnv1.ProtocolIPv6 {
-			if err := pingGateway(gw, src, verbose, maxRetry); err != nil {
+			_, err := pingGateway(gw, src, verbose, maxRetry)
+			if err != nil {
+				klog.Error(err)
 				return err
 			}
 		}
@@ -251,7 +256,7 @@ func waitNetworkReady(nic, ipAddr, gateway string, underlayGateway, verbose bool
 }
 
 func configureNodeNic(portName, ip, gw string, macAddr net.HardwareAddr, mtu int) error {
-	ipStr := util.GetIpWithoutMask(ip)
+	ipStr := util.GetIPWithoutMask(ip)
 	raw, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", util.NodeNic, "--",
 		"set", "interface", util.NodeNic, "type=internal", "--",
 		"set", "interface", util.NodeNic, fmt.Sprintf("external_ids:iface-id=%s", portName),
@@ -262,6 +267,7 @@ func configureNodeNic(portName, ip, gw string, macAddr net.HardwareAddr, mtu int
 	}
 
 	if err = configureNic(util.NodeNic, ip, macAddr, mtu); err != nil {
+		klog.Error(err)
 		return err
 	}
 
@@ -318,12 +324,12 @@ func configureMirrorLink(portName string, mtu int) error {
 	return nil
 }
 
-func configProviderNic(nicName, brName string) (int, error) {
+func (c *Controller) configProviderNic(nicName, brName string) (int, error) {
 	// nothing to do on Windows
 	return 0, nil
 }
 
-func removeProviderNic(nicName, brName string) error {
+func (c *Controller) removeProviderNic(nicName, brName string) error {
 	// nothing to do on Windows
 	return nil
 }
@@ -336,4 +342,12 @@ func turnOffNicTxChecksum(nicName string) error {
 func getShortSharedDir(uid types.UID, volumeName string) string {
 	// DPDK is not supported on Windows
 	return ""
+}
+
+func linkExists(name string) (bool, error) {
+	_, err := util.GetNetAdapter(name, true)
+	if err != nil {
+		return false, nil
+	}
+	return true, nil
 }

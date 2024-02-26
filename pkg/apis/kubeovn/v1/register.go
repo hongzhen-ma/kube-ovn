@@ -33,6 +33,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&IP{},
 		&IPList{},
+		&IPPool{},
+		&IPPoolList{},
 		&Subnet{},
 		&SubnetList{},
 		&Vlan{},
@@ -59,12 +61,16 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&OvnFipList{},
 		&OvnSnatRule{},
 		&OvnSnatRuleList{},
+		&OvnDnatRule{},
+		&OvnDnatRuleList{},
 		&SecurityGroup{},
 		&SecurityGroupList{},
 		&SwitchLBRule{},
 		&SwitchLBRuleList{},
 		&VpcDns{},
 		&VpcDnsList{},
+		&QoSPolicy{},
+		&QoSPolicyList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

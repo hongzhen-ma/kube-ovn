@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -37,11 +35,7 @@ func init() {
 }
 
 func TestE2E(t *testing.T) {
-	if k8sframework.TestContext.KubeConfig == "" {
-		k8sframework.TestContext.KubeConfig = filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	}
 	k8sframework.AfterReadingAllFlags(&k8sframework.TestContext)
-
 	e2e.RunE2ETests(t)
 }
 
@@ -53,7 +47,7 @@ func checkDeployment(f *framework.Framework, name, process string, ports ...stri
 	framework.ExpectNoError(err, "deployment failed to complete")
 
 	ginkgo.By("Getting pods")
-	pods, err := deployment.GetPodsForDeployment(f.ClientSet, deploy)
+	pods, err := deployment.GetPodsForDeployment(context.Background(), f.ClientSet, deploy)
 	framework.ExpectNoError(err, "failed to get pods")
 	framework.ExpectNotEmpty(pods.Items)
 
@@ -139,14 +133,13 @@ var _ = framework.Describe("[group:security]", func() {
 
 	framework.ConformanceIt("kube-ovn-cni should listen on specified addresses", func() {
 		ginkgo.By("Getting nodes")
-		nodeList, err := e2enode.GetReadySchedulableNodes(cs)
+		nodeList, err := e2enode.GetReadySchedulableNodes(context.Background(), cs)
 		framework.ExpectNoError(err)
 		framework.ExpectNotEmpty(nodeList.Items)
 
 		ginkgo.By("Getting daemonset kube-ovn-cni")
 		daemonSetClient := f.DaemonSetClientNS(framework.KubeOvnNamespace)
 		ds := daemonSetClient.Get("kube-ovn-cni")
-		framework.ExpectNoError(err, "failed to to get daemonset kube-ovn-cni")
 
 		ginkgo.By("Getting kube-ovn-cni pods")
 		pods := make([]corev1.Pod, 0, len(nodeList.Items))

@@ -25,15 +25,6 @@ func newLogicalRouterPort(lrName, lrpName, mac string, networks []string) *ovnnb
 	}
 }
 
-func createLogicalRouterPort(c *ovnClient, lrp *ovnnb.LogicalRouterPort) error {
-	op, err := c.Create(lrp)
-	if err != nil {
-		return fmt.Errorf("generate operations for creating logical router port %s: %v", lrp.Name, err)
-	}
-
-	return c.Transact("lrp-create", op)
-}
-
 func (suite *OvnClientTestSuite) testCreatePeerRouterPort() {
 	t := suite.T()
 	t.Parallel()
@@ -125,11 +116,10 @@ func (suite *OvnClientTestSuite) testUpdateLogicalRouterPortRA() {
 		require.NoError(t, err)
 		require.Empty(t, out.Ipv6Prefix)
 		require.Empty(t, out.Ipv6RaConfigs)
-
 	})
 
 	t.Run("do nothing when enableIPv6RA is true and ipv6RAConfigsStr is invalid", func(t *testing.T) {
-		err := ovnClient.UpdateLogicalRouterPortRA(lrpName, "address_mode=,test ", true)
+		err := ovnClient.UpdateLogicalRouterPortRA(lrpName, "address_mode=,test", true)
 		require.NoError(t, err)
 	})
 
@@ -143,14 +133,69 @@ func (suite *OvnClientTestSuite) testUpdateLogicalRouterPortRA() {
 	})
 }
 
+func (suite *OvnClientTestSuite) testUpdateLogicalRouterPortOptions() {
+	t := suite.T()
+	t.Parallel()
+
+	ovnClient := suite.ovnClient
+	lrpName := "test-update-lrp-opt"
+	lrName := "test-update-lrp-opt-lr"
+	options := map[string]string{
+		"k1": "v1",
+		"k2": "v2",
+	}
+
+	err := ovnClient.CreateLogicalRouter(lrName)
+	require.NoError(t, err)
+
+	err = ovnClient.CreateLogicalRouterPort(lrName, lrpName, "00:11:22:37:af:62", []string{"fd00::c0a8:1001/120"})
+	require.NoError(t, err)
+
+	t.Run("add logical router port options", func(t *testing.T) {
+		err := ovnClient.UpdateLogicalRouterPortOptions(lrpName, options)
+		require.NoError(t, err)
+
+		lrp, err := ovnClient.GetLogicalRouterPort(lrpName, false)
+		require.NoError(t, err)
+		require.Equal(t, options, lrp.Options)
+	})
+
+	t.Run("remove logical router port options", func(t *testing.T) {
+		err := ovnClient.UpdateLogicalRouterPortOptions(lrpName, options)
+		require.NoError(t, err)
+
+		err = ovnClient.UpdateLogicalRouterPortOptions(lrpName, map[string]string{"k2": ""})
+		require.NoError(t, err)
+
+		lrp, err := ovnClient.GetLogicalRouterPort(lrpName, false)
+		require.NoError(t, err)
+		require.Equal(t, map[string]string{"k1": "v1"}, lrp.Options)
+	})
+
+	t.Run("update logical router port options", func(t *testing.T) {
+		err := ovnClient.UpdateLogicalRouterPortOptions(lrpName, options)
+		require.NoError(t, err)
+
+		err = ovnClient.UpdateLogicalRouterPortOptions(lrpName, map[string]string{
+			"k2": "",
+			"k3": "v3",
+		})
+		require.NoError(t, err)
+
+		lrp, err := ovnClient.GetLogicalRouterPort(lrpName, false)
+		require.NoError(t, err)
+		require.Equal(t, map[string]string{"k1": "v1", "k3": "v3"}, lrp.Options)
+	})
+}
+
 func (suite *OvnClientTestSuite) testCreateLogicalRouterPort() {
 	t := suite.T()
 	t.Parallel()
 
 	ovnClient := suite.ovnClient
-	LrName := "test-create-lrp-lr"
+	lrName := "test-create-lrp-lr"
 
-	err := ovnClient.CreateLogicalRouter(LrName)
+	err := ovnClient.CreateLogicalRouter(lrName)
 	require.NoError(t, err)
 
 	t.Run("create new logical router port with ipv4", func(t *testing.T) {
@@ -158,7 +203,7 @@ func (suite *OvnClientTestSuite) testCreateLogicalRouterPort() {
 
 		lrpName := "test-create-lrp-ipv4"
 
-		err := ovnClient.CreateLogicalRouterPort(LrName, lrpName, "00:11:22:37:af:62", []string{"192.168.123.1/24"})
+		err := ovnClient.CreateLogicalRouterPort(lrName, lrpName, "00:11:22:37:af:62", []string{"192.168.123.1/24"})
 		require.NoError(t, err)
 
 		lrp, err := ovnClient.GetLogicalRouterPort(lrpName, false)
@@ -167,7 +212,7 @@ func (suite *OvnClientTestSuite) testCreateLogicalRouterPort() {
 		require.Equal(t, "00:11:22:37:af:62", lrp.MAC)
 		require.ElementsMatch(t, []string{"192.168.123.1/24"}, lrp.Networks)
 
-		lr, err := ovnClient.GetLogicalRouter(LrName, false)
+		lr, err := ovnClient.GetLogicalRouter(lrName, false)
 		require.NoError(t, err)
 		require.Contains(t, lr.Ports, lrp.UUID)
 	})
@@ -177,7 +222,7 @@ func (suite *OvnClientTestSuite) testCreateLogicalRouterPort() {
 
 		lrpName := "test-create-lrp-ipv6"
 
-		err := ovnClient.CreateLogicalRouterPort(LrName, lrpName, "00:11:22:37:af:62", []string{"fd00::c0a8:7b01/120"})
+		err := ovnClient.CreateLogicalRouterPort(lrName, lrpName, "00:11:22:37:af:62", []string{"fd00::c0a8:7b01/120"})
 		require.NoError(t, err)
 
 		lrp, err := ovnClient.GetLogicalRouterPort(lrpName, false)
@@ -186,7 +231,7 @@ func (suite *OvnClientTestSuite) testCreateLogicalRouterPort() {
 		require.Equal(t, "00:11:22:37:af:62", lrp.MAC)
 		require.ElementsMatch(t, []string{"fd00::c0a8:7b01/120"}, lrp.Networks)
 
-		lr, err := ovnClient.GetLogicalRouter(LrName, false)
+		lr, err := ovnClient.GetLogicalRouter(lrName, false)
 		require.NoError(t, err)
 		require.Contains(t, lr.Ports, lrp.UUID)
 	})
@@ -195,7 +240,7 @@ func (suite *OvnClientTestSuite) testCreateLogicalRouterPort() {
 		t.Parallel()
 
 		lrpName := "test-create-lrp-dual"
-		err := ovnClient.CreateLogicalRouterPort(LrName, lrpName, "00:11:22:37:af:62", []string{"192.168.123.1/24", "fd00::c0a8:7b01/120"})
+		err := ovnClient.CreateLogicalRouterPort(lrName, lrpName, "00:11:22:37:af:62", []string{"192.168.123.1/24", "fd00::c0a8:7b01/120"})
 		require.NoError(t, err)
 
 		lrp, err := ovnClient.GetLogicalRouterPort(lrpName, false)
@@ -204,7 +249,7 @@ func (suite *OvnClientTestSuite) testCreateLogicalRouterPort() {
 		require.Equal(t, "00:11:22:37:af:62", lrp.MAC)
 		require.ElementsMatch(t, []string{"192.168.123.1/24", "fd00::c0a8:7b01/120"}, lrp.Networks)
 
-		lr, err := ovnClient.GetLogicalRouter(LrName, false)
+		lr, err := ovnClient.GetLogicalRouter(lrName, false)
 		require.NoError(t, err)
 		require.Contains(t, lr.Ports, lrp.UUID)
 	})
@@ -284,12 +329,6 @@ func (suite *OvnClientTestSuite) testDeleteLogicalRouterPorts() {
 
 	require.NoError(t, err)
 
-	for i := 0; i < 3; i++ {
-		lrpName := fmt.Sprintf("%s-%d", prefix, i)
-		_, err := ovnClient.GetLogicalRouterPort(lrpName, false)
-		require.ErrorContains(t, err, "object not found")
-	}
-
 	lr, err = ovnClient.GetLogicalRouter(lrName, false)
 	require.NoError(t, err)
 	require.Empty(t, lr.Ports)
@@ -319,9 +358,6 @@ func (suite *OvnClientTestSuite) testDeleteLogicalRouterPort() {
 
 		err = ovnClient.DeleteLogicalRouterPort(lrpName)
 		require.NoError(t, err)
-
-		_, err = ovnClient.GetLogicalRouterPort(lrpName, false)
-		require.ErrorContains(t, err, "object not found")
 
 		lr, err = ovnClient.GetLogicalRouter(lrName, false)
 		require.NoError(t, err)
@@ -434,7 +470,7 @@ func (suite *OvnClientTestSuite) testDeleteLogicalRouterPortOp() {
 
 	ops, err := ovnClient.DeleteLogicalRouterPortOp(lrpName)
 	require.NoError(t, err)
-	require.Len(t, ops, 2)
+	require.Len(t, ops, 1)
 
 	require.Equal(t,
 		[]ovsdb.Mutation{
@@ -450,21 +486,6 @@ func (suite *OvnClientTestSuite) testDeleteLogicalRouterPortOp() {
 				},
 			},
 		}, ops[0].Mutations)
-
-	require.Equal(t,
-		ovsdb.Operation{
-			Op:    "delete",
-			Table: "Logical_Router_Port",
-			Where: []ovsdb.Condition{
-				{
-					Column:   "_uuid",
-					Function: "==",
-					Value: ovsdb.UUID{
-						GoUUID: lrp.UUID,
-					},
-				},
-			},
-		}, ops[1])
 }
 
 func (suite *OvnClientTestSuite) testLogicalRouterPortOp() {
@@ -472,44 +493,40 @@ func (suite *OvnClientTestSuite) testLogicalRouterPortOp() {
 	t.Parallel()
 
 	ovnClient := suite.ovnClient
-	lrpName := "test-op-lrp"
+	lrName := "test-op-lrp-lr"
+	lrpName := "test-op-lrp-lrp"
 
-	lrp := &ovnnb.LogicalRouterPort{
-		UUID: ovsclient.NamedUUID(),
-		Name: lrpName,
-		ExternalIDs: map[string]string{
-			"vendor": util.CniTypeName,
-		},
-	}
-
-	err := createLogicalRouterPort(ovnClient, lrp)
+	err := ovnClient.CreateLogicalRouter(lrName)
 	require.NoError(t, err)
 
-	gwChassisUUID := ovsclient.NamedUUID()
+	err = ovnClient.CreateLogicalRouterPort(lrName, lrpName, util.GenerateMac(), []string{"172.177.19.1/24"})
+	require.NoError(t, err)
+
+	lrp, err := ovnClient.GetLogicalRouterPort(lrpName, false)
+	require.NoError(t, err)
+	require.NotNil(t, lrp)
+	require.ElementsMatch(t, lrp.Networks, []string{"172.177.19.1/24"})
 
 	mutation := func(lrp *ovnnb.LogicalRouterPort) *model.Mutation {
-		mutation := &model.Mutation{
-			Field:   &lrp.GatewayChassis,
-			Value:   []string{gwChassisUUID},
+		return &model.Mutation{
+			Field:   &lrp.Networks,
+			Value:   []string{"172.177.29.1/24", "172.177.39.1/24"},
 			Mutator: ovsdb.MutateOperationInsert,
 		}
-
-		return mutation
 	}
 
 	ops, err := ovnClient.LogicalRouterPortOp(lrpName, mutation)
 	require.NoError(t, err)
-
+	require.Len(t, ops, 1)
 	require.Len(t, ops[0].Mutations, 1)
 	require.Equal(t, []ovsdb.Mutation{
 		{
-			Column:  "gateway_chassis",
+			Column:  "networks",
 			Mutator: ovsdb.MutateOperationInsert,
 			Value: ovsdb.OvsSet{
 				GoSet: []interface{}{
-					ovsdb.UUID{
-						GoUUID: gwChassisUUID,
-					},
+					"172.177.29.1/24",
+					"172.177.39.1/24",
 				},
 			},
 		},

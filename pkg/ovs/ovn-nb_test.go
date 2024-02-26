@@ -19,7 +19,7 @@ func (suite *OvnClientTestSuite) testCreateGatewayLogicalSwitch() {
 	lrName := "test-create-gw-lr"
 	lspName := fmt.Sprintf("%s-%s", lsName, lrName)
 	lrpName := fmt.Sprintf("%s-%s", lrName, lsName)
-	localnetLspName := fmt.Sprintf("ln-%s", lsName)
+	localnetLspName := GetLocalnetName(lsName)
 	chassises := []string{"5de32fcb-495a-40df-919e-f09812c4d11e", "25310674-65ce-69fd-bcfa-65b25268926b"}
 
 	err := ovnClient.CreateLogicalRouter(lrName)
@@ -125,14 +125,6 @@ func (suite *OvnClientTestSuite) testRemoveRouterPort() {
 
 		err = ovnClient.RemoveLogicalPatchPort(lspName, lrpName)
 		require.NoError(t, err)
-
-		/* validate logical switch port*/
-		_, err = ovnClient.GetLogicalSwitchPort(lspName, false)
-		require.ErrorContains(t, err, "object not found")
-
-		/* validate logical router port*/
-		_, err = ovnClient.GetLogicalRouterPort(lrpName, false)
-		require.ErrorContains(t, err, "object not found")
 	})
 
 	t.Run("should no err normal del router type port repeatedly", func(t *testing.T) {
@@ -148,7 +140,6 @@ func (suite *OvnClientTestSuite) testDeleteLogicalGatewaySwitch() {
 	ovnClient := suite.ovnClient
 	lsName := "test-del-gw-ls"
 	lrName := "test-del-gw-lr"
-	lrpName := fmt.Sprintf("%s-%s", lrName, lsName)
 
 	err := ovnClient.CreateLogicalRouter(lrName)
 	require.NoError(t, err)
@@ -164,9 +155,6 @@ func (suite *OvnClientTestSuite) testDeleteLogicalGatewaySwitch() {
 
 	_, err = ovnClient.GetLogicalSwitch(lsName, false)
 	require.ErrorContains(t, err, "not found logical switch")
-
-	_, err = ovnClient.GetLogicalRouterPort(lrpName, false)
-	require.ErrorContains(t, err, "object not found")
 }
 
 func (suite *OvnClientTestSuite) testDeleteSecurityGroup() {
@@ -187,7 +175,7 @@ func (suite *OvnClientTestSuite) testDeleteSecurityGroup() {
 	})
 	require.NoError(t, err)
 
-	acl, err := ovnClient.newAcl(pgName, ovnnb.ACLDirectionToLport, priority, match, ovnnb.ACLActionAllowRelated)
+	acl, err := ovnClient.newACL(pgName, ovnnb.ACLDirectionToLport, priority, match, ovnnb.ACLActionAllowRelated)
 	require.NoError(t, err)
 
 	err = ovnClient.CreateAcls(pgName, portGroupKey, acl)
@@ -201,9 +189,6 @@ func (suite *OvnClientTestSuite) testDeleteSecurityGroup() {
 	/* run test */
 	err = ovnClient.DeleteSecurityGroup(sgName)
 	require.NoError(t, err)
-
-	_, err = ovnClient.GetAcl(pgName, ovnnb.ACLDirectionToLport, priority, match, false)
-	require.ErrorContains(t, err, "not found acl")
 
 	_, err = ovnClient.GetAddressSet(asName, false)
 	require.ErrorContains(t, err, "object not found")

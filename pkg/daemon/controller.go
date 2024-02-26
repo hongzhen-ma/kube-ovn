@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	k8sexec "k8s.io/utils/exec"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	kubeovninformer "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions"
@@ -60,10 +62,12 @@ type Controller struct {
 	ControllerRuntime
 	localPodName   string
 	localNamespace string
+
+	k8sExec k8sexec.Interface
 }
 
 // NewController init a daemon controller
-func NewController(config *Configuration, podInformerFactory informers.SharedInformerFactory, nodeInformerFactory informers.SharedInformerFactory, kubeovnInformerFactory kubeovninformer.SharedInformerFactory) (*Controller, error) {
+func NewController(config *Configuration, stopCh <-chan struct{}, podInformerFactory, nodeInformerFactory informers.SharedInformerFactory, kubeovnInformerFactory kubeovninformer.SharedInformerFactory) (*Controller, error) {
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(klog.Infof)
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: config.KubeClient.CoreV1().Events("")})
@@ -98,16 +102,27 @@ func NewController(config *Configuration, podInformerFactory informers.SharedInf
 		nodesSynced: nodeInformer.Informer().HasSynced,
 
 		recorder: recorder,
+		k8sExec:  k8sexec.New(),
 	}
 
 	node, err := config.KubeClient.CoreV1().Nodes().Get(context.Background(), config.NodeName, metav1.GetOptions{})
 	if err != nil {
 		util.LogFatalAndExit(err, "failed to get node %s info", config.NodeName)
 	}
-	controller.protocol = util.CheckProtocol(node.Annotations[util.IpAddressAnnotation])
+	controller.protocol = util.CheckProtocol(node.Annotations[util.IPAddressAnnotation])
 
 	if err = controller.initRuntime(); err != nil {
 		return nil, err
+	}
+
+	podInformerFactory.Start(stopCh)
+	nodeInformerFactory.Start(stopCh)
+	kubeovnInformerFactory.Start(stopCh)
+
+	if !cache.WaitForCacheSync(stopCh,
+		controller.providerNetworksSynced, controller.subnetsSynced,
+		controller.podsSynced, controller.nodesSynced) {
+		util.LogFatalAndExit(nil, "failed to wait for caches to sync")
 	}
 
 	if _, err = providerNetworkInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -144,8 +159,8 @@ func (c *Controller) enqueueAddProviderNetwork(obj interface{}) {
 	c.addOrUpdateProviderNetworkQueue.Add(key)
 }
 
-func (c *Controller) enqueueUpdateProviderNetwork(old, new interface{}) {
-	key, err := cache.MetaNamespaceKeyFunc(new)
+func (c *Controller) enqueueUpdateProviderNetwork(_, newObj interface{}) {
+	key, err := cache.MetaNamespaceKeyFunc(newObj)
 	if err != nil {
 		utilruntime.HandleError(err)
 		return
@@ -191,7 +206,6 @@ func (c *Controller) processNextAddOrUpdateProviderNetworkWorkItem() bool {
 		c.addOrUpdateProviderNetworkQueue.Forget(obj)
 		return nil
 	}(obj)
-
 	if err != nil {
 		utilruntime.HandleError(err)
 		c.addOrUpdateProviderNetworkQueue.AddRateLimited(obj)
@@ -221,7 +235,6 @@ func (c *Controller) processNextDeleteProviderNetworkWorkItem() bool {
 		c.deleteProviderNetworkQueue.Forget(obj)
 		return nil
 	}(obj)
-
 	if err != nil {
 		utilruntime.HandleError(err)
 		c.deleteProviderNetworkQueue.AddRateLimited(obj)
@@ -234,6 +247,7 @@ func (c *Controller) handleAddOrUpdateProviderNetwork(key string) error {
 	klog.V(3).Infof("handle update provider network %s", key)
 	node, err := c.nodesLister.Get(c.config.NodeName)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 	pn, err := c.providerNetworksLister.Get(key)
@@ -241,10 +255,11 @@ func (c *Controller) handleAddOrUpdateProviderNetwork(key string) error {
 		if k8serrors.IsNotFound(err) {
 			return nil
 		}
+		klog.Error(err)
 		return err
 	}
 
-	if util.ContainsString(pn.Spec.ExcludeNodes, node.Name) {
+	if slices.Contains(pn.Spec.ExcludeNodes, node.Name) {
 		c.recordProviderNetworkErr(pn.Name, "")
 		return c.cleanProviderNetwork(pn.DeepCopy(), node.DeepCopy())
 	}
@@ -254,7 +269,7 @@ func (c *Controller) handleAddOrUpdateProviderNetwork(key string) error {
 func (c *Controller) initProviderNetwork(pn *kubeovnv1.ProviderNetwork, node *v1.Node) error {
 	nic := pn.Spec.DefaultInterface
 	for _, item := range pn.Spec.CustomInterfaces {
-		if util.ContainsString(item.Nodes, node.Name) {
+		if slices.Contains(item.Nodes, node.Name) {
 			nic = item.Interface
 			break
 		}
@@ -263,7 +278,7 @@ func (c *Controller) initProviderNetwork(pn *kubeovnv1.ProviderNetwork, node *v1
 	var mtu int
 	var err error
 	klog.V(3).Infof("ovs init provider network %s", pn.Name)
-	if mtu, err = ovsInitProviderNetwork(pn.Name, nic, pn.Spec.ExchangeLinkName, c.config.MacLearningFallback); err != nil {
+	if mtu, err = c.ovsInitProviderNetwork(pn.Name, nic, pn.Spec.ExchangeLinkName, c.config.MacLearningFallback); err != nil {
 		if oldLen := len(node.Labels); oldLen != 0 {
 			delete(node.Labels, fmt.Sprintf(util.ProviderNetworkReadyTemplate, pn.Name))
 			delete(node.Labels, fmt.Sprintf(util.ProviderNetworkInterfaceTemplate, pn.Name))
@@ -303,7 +318,7 @@ func (c *Controller) initProviderNetwork(pn *kubeovnv1.ProviderNetwork, node *v1
 	return nil
 }
 
-func (c *Controller) recordProviderNetworkErr(providerNetwork string, errMsg string) {
+func (c *Controller) recordProviderNetworkErr(providerNetwork, errMsg string) {
 	var currentPod *v1.Pod
 	var err error
 	if c.localPodName == "" {
@@ -328,7 +343,7 @@ func (c *Controller) recordProviderNetworkErr(providerNetwork string, errMsg str
 			return
 		}
 	} else {
-		if currentPod, err = c.config.KubeClient.CoreV1().Pods(c.localNamespace).Get(context.Background(), c.localPodName, metav1.GetOptions{}); err != nil {
+		if currentPod, err = c.podsLister.Pods(c.localNamespace).Get(c.localPodName); err != nil {
 			klog.Errorf("failed to get pod %s, %v", c.localPodName, err)
 			return
 		}
@@ -377,20 +392,18 @@ func (c *Controller) cleanProviderNetwork(pn *kubeovnv1.ProviderNetwork, node *v
 		return err
 	}
 
-	if err = ovsCleanProviderNetwork(pn.Name); err != nil {
-		return err
-	}
-
-	return nil
+	return c.ovsCleanProviderNetwork(pn.Name)
 }
 
 func (c *Controller) handleDeleteProviderNetwork(pn *kubeovnv1.ProviderNetwork) error {
-	if err := ovsCleanProviderNetwork(pn.Name); err != nil {
+	if err := c.ovsCleanProviderNetwork(pn.Name); err != nil {
+		klog.Error(err)
 		return err
 	}
 
 	node, err := c.nodesLister.Get(c.config.NodeName)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 	if len(node.Labels) == 0 {
@@ -415,19 +428,19 @@ func (c *Controller) handleDeleteProviderNetwork(pn *kubeovnv1.ProviderNetwork) 
 }
 
 type subnetEvent struct {
-	old, new interface{}
+	oldObj, newObj interface{}
 }
 
 func (c *Controller) enqueueAddSubnet(obj interface{}) {
-	c.subnetQueue.Add(subnetEvent{new: obj})
+	c.subnetQueue.Add(subnetEvent{newObj: obj})
 }
 
-func (c *Controller) enqueueUpdateSubnet(old, new interface{}) {
-	c.subnetQueue.Add(subnetEvent{old: old, new: new})
+func (c *Controller) enqueueUpdateSubnet(oldObj, newObj interface{}) {
+	c.subnetQueue.Add(subnetEvent{oldObj: oldObj, newObj: newObj})
 }
 
 func (c *Controller) enqueueDeleteSubnet(obj interface{}) {
-	c.subnetQueue.Add(subnetEvent{old: obj})
+	c.subnetQueue.Add(subnetEvent{oldObj: obj})
 }
 
 func (c *Controller) runSubnetWorker() {
@@ -449,14 +462,13 @@ func (c *Controller) processNextSubnetWorkItem() bool {
 			utilruntime.HandleError(fmt.Errorf("expected subnetEvent in workqueue but got %#v", obj))
 			return nil
 		}
-		if err := c.reconcileRouters(event); err != nil {
+		if err := c.reconcileRouters(&event); err != nil {
 			c.subnetQueue.AddRateLimited(event)
 			return fmt.Errorf("error syncing '%s': %s, requeuing", event, err.Error())
 		}
 		c.subnetQueue.Forget(obj)
 		return nil
 	}(obj)
-
 	if err != nil {
 		utilruntime.HandleError(err)
 		return true
@@ -464,9 +476,9 @@ func (c *Controller) processNextSubnetWorkItem() bool {
 	return true
 }
 
-func (c *Controller) enqueuePod(old, new interface{}) {
-	oldPod := old.(*v1.Pod)
-	newPod := new.(*v1.Pod)
+func (c *Controller) enqueuePod(oldObj, newObj interface{}) {
+	oldPod := oldObj.(*v1.Pod)
+	newPod := newObj.(*v1.Pod)
 
 	if oldPod.Annotations[util.IngressRateAnnotation] != newPod.Annotations[util.IngressRateAnnotation] ||
 		oldPod.Annotations[util.EgressRateAnnotation] != newPod.Annotations[util.EgressRateAnnotation] ||
@@ -477,7 +489,7 @@ func (c *Controller) enqueuePod(old, new interface{}) {
 		oldPod.Annotations[util.MirrorControlAnnotation] != newPod.Annotations[util.MirrorControlAnnotation] {
 		var key string
 		var err error
-		if key, err = cache.MetaNamespaceKeyFunc(new); err != nil {
+		if key, err = cache.MetaNamespaceKeyFunc(newObj); err != nil {
 			utilruntime.HandleError(err)
 			return
 		}
@@ -500,7 +512,7 @@ func (c *Controller) enqueuePod(old, new interface{}) {
 				oldPod.Annotations[fmt.Sprintf(util.MirrorControlAnnotationTemplate, provider)] != newPod.Annotations[fmt.Sprintf(util.MirrorControlAnnotationTemplate, provider)] {
 				var key string
 				var err error
-				if key, err = cache.MetaNamespaceKeyFunc(new); err != nil {
+				if key, err = cache.MetaNamespaceKeyFunc(newObj); err != nil {
 					utilruntime.HandleError(err)
 					return
 				}
@@ -538,7 +550,6 @@ func (c *Controller) processNextPodWorkItem() bool {
 		c.podQueue.Forget(obj)
 		return nil
 	}(obj)
-
 	if err != nil {
 		utilruntime.HandleError(err)
 		return true
@@ -586,10 +597,6 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	go wait.Until(rotateLog, 1*time.Hour, stopCh)
 	go wait.Until(c.operateMod, 10*time.Second, stopCh)
 
-	if ok := cache.WaitForCacheSync(stopCh, c.providerNetworksSynced, c.subnetsSynced, c.podsSynced, c.nodesSynced); !ok {
-		util.LogFatalAndExit(nil, "failed to wait for caches to sync")
-	}
-
 	if err := c.setIPSet(); err != nil {
 		util.LogFatalAndExit(err, "failed to set ipsets")
 	}
@@ -602,13 +609,29 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	go wait.Until(c.runSubnetWorker, time.Second, stopCh)
 	go wait.Until(c.runPodWorker, time.Second, stopCh)
 	go wait.Until(c.runGateway, 3*time.Second, stopCh)
-	go wait.Until(c.loopEncapIpCheck, 3*time.Second, stopCh)
+	go wait.Until(c.loopEncapIPCheck, 3*time.Second, stopCh)
 	go wait.Until(c.ovnMetricsUpdate, 3*time.Second, stopCh)
+	go wait.Until(func() {
+		if err := c.reconcileRouters(nil); err != nil {
+			klog.Errorf("failed to reconcile ovn0 routes: %v", err)
+		}
+	}, 3*time.Second, stopCh)
 	go wait.Until(func() {
 		if err := c.markAndCleanInternalPort(); err != nil {
 			klog.Errorf("gc ovs port error: %v", err)
 		}
 	}, 5*time.Minute, stopCh)
+
+	if c.config.EnableTProxy {
+		go c.StartTProxyForwarding()
+		go wait.Until(c.runTProxyConfigWorker, 3*time.Second, stopCh)
+		// Using the tproxy method, kubelet's TCP probe packets cannot reach the namespace of the pod of the custom VPC,
+		// so tproxy itself probes the pod of the custom VPC, if probe failed remove the iptable rules from
+		// kubelet to tproxy, if probe success recover the iptable rules
+		go wait.Until(c.StartTProxyTCPPortProbe, 1*time.Second, stopCh)
+	} else {
+		c.cleanTProxyConfig()
+	}
 
 	<-stopCh
 	klog.Info("Shutting down workers")

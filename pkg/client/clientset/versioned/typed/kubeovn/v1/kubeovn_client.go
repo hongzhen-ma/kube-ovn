@@ -29,14 +29,17 @@ import (
 type KubeovnV1Interface interface {
 	RESTClient() rest.Interface
 	IPsGetter
+	IPPoolsGetter
 	IptablesDnatRulesGetter
 	IptablesEIPsGetter
 	IptablesFIPRulesGetter
 	IptablesSnatRulesGetter
+	OvnDnatRulesGetter
 	OvnEipsGetter
 	OvnFipsGetter
 	OvnSnatRulesGetter
 	ProviderNetworksGetter
+	QoSPoliciesGetter
 	SecurityGroupsGetter
 	SubnetsGetter
 	SwitchLBRulesGetter
@@ -56,6 +59,10 @@ func (c *KubeovnV1Client) IPs() IPInterface {
 	return newIPs(c)
 }
 
+func (c *KubeovnV1Client) IPPools() IPPoolInterface {
+	return newIPPools(c)
+}
+
 func (c *KubeovnV1Client) IptablesDnatRules() IptablesDnatRuleInterface {
 	return newIptablesDnatRules(c)
 }
@@ -72,6 +79,10 @@ func (c *KubeovnV1Client) IptablesSnatRules() IptablesSnatRuleInterface {
 	return newIptablesSnatRules(c)
 }
 
+func (c *KubeovnV1Client) OvnDnatRules() OvnDnatRuleInterface {
+	return newOvnDnatRules(c)
+}
+
 func (c *KubeovnV1Client) OvnEips() OvnEipInterface {
 	return newOvnEips(c)
 }
@@ -86,6 +97,10 @@ func (c *KubeovnV1Client) OvnSnatRules() OvnSnatRuleInterface {
 
 func (c *KubeovnV1Client) ProviderNetworks() ProviderNetworkInterface {
 	return newProviderNetworks(c)
+}
+
+func (c *KubeovnV1Client) QoSPolicies() QoSPolicyInterface {
+	return newQoSPolicies(c)
 }
 
 func (c *KubeovnV1Client) SecurityGroups() SecurityGroupInterface {

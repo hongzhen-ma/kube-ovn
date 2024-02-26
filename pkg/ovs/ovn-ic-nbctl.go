@@ -40,7 +40,26 @@ func (c LegacyClient) ovnIcNbCommand(cmdArgs ...string) (string, error) {
 func (c LegacyClient) GetTsSubnet(ts string) (string, error) {
 	subnet, err := c.ovnIcNbCommand("get", "Transit_Switch", ts, "external_ids:subnet")
 	if err != nil {
+		klog.Error(err)
 		return "", fmt.Errorf("failed to get ts subnet, %v", err)
 	}
 	return subnet, nil
+}
+
+func (c LegacyClient) GetTs() ([]string, error) {
+	cmd := []string{"--format=csv", "--data=bare", "--no-heading", "--columns=name", "find", "Transit_Switch"}
+	output, err := c.ovnIcNbCommand(cmd...)
+	if err != nil {
+		klog.Errorf("failed to list logical switch port, %v", err)
+		return nil, err
+	}
+	lines := strings.Split(output, "\n")
+	result := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if len(strings.TrimSpace(l)) == 0 {
+			continue
+		}
+		result = append(result, strings.TrimSpace(l))
+	}
+	return result, nil
 }

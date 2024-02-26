@@ -3,8 +3,6 @@ package kubevirt
 import (
 	"context"
 	"flag"
-	"os"
-	"path/filepath"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,11 +27,7 @@ func init() {
 }
 
 func TestE2E(t *testing.T) {
-	if k8sframework.TestContext.KubeConfig == "" {
-		k8sframework.TestContext.KubeConfig = filepath.Join(os.Getenv("HOME"), ".kube", "config")
-	}
 	k8sframework.AfterReadingAllFlags(&k8sframework.TestContext)
-
 	e2e.RunE2ETests(t)
 }
 
@@ -46,21 +40,21 @@ var _ = framework.Describe("[group:kubevirt]", func() {
 	})
 
 	framework.ConformanceIt("Kubevirt vm pod should keep ip", func() {
-		f.SkipVersionPriorTo(1, 12, "Only test kubevirt vm keep ip in master")
+		f.SkipVersionPriorTo(1, 12, "This feature was introduced in v1.12.")
 
 		ginkgo.By("Get kubevirt vm pod")
 		podList, err := podClient.List(context.TODO(), metav1.ListOptions{
 			LabelSelector: "vm.kubevirt.io/name=testvm",
 		})
 		framework.ExpectNoError(err)
-		framework.ExpectEqual(len(podList.Items), 1)
+		framework.ExpectHaveLen(podList.Items, 1)
 
 		ginkgo.By("Validating pod annotations")
-		pod := podList.Items[0]
+		pod := &podList.Items[0]
 		framework.ExpectHaveKeyWithValue(pod.Annotations, util.AllocatedAnnotation, "true")
 		framework.ExpectHaveKeyWithValue(pod.Annotations, util.RoutedAnnotation, "true")
 		framework.ExpectHaveKeyWithValue(pod.Annotations, "ovn.kubernetes.io/virtualmachine", "testvm")
-		ipAddr := pod.Annotations[util.IpAddressAnnotation]
+		ipAddr := pod.Annotations[util.IPAddressAnnotation]
 
 		ginkgo.By("Deleting pod " + pod.Name)
 		podClient.DeleteSync(pod.Name)
@@ -71,16 +65,20 @@ var _ = framework.Describe("[group:kubevirt]", func() {
 			LabelSelector: "vm.kubevirt.io/name=testvm",
 		})
 		framework.ExpectNoError(err)
-		framework.ExpectEqual(len(podList.Items), 1)
+		framework.ExpectHaveLen(podList.Items, 1)
+
+		pod = &podList.Items[0]
+		ginkgo.By("Waiting for pod " + pod.Name + " to be running")
+		podClient.WaitForRunning(pod.Name)
 
 		ginkgo.By("Validating new pod annotations")
-		pod = podList.Items[0]
+		pod = podClient.GetPod(pod.Name)
 		framework.ExpectHaveKeyWithValue(pod.Annotations, util.AllocatedAnnotation, "true")
 		framework.ExpectHaveKeyWithValue(pod.Annotations, util.RoutedAnnotation, "true")
 		framework.ExpectHaveKeyWithValue(pod.Annotations, "ovn.kubernetes.io/virtualmachine", "testvm")
 
 		ginkgo.By("Check vm pod ip unchanged" + pod.Name)
-		ipNewAddr := pod.Annotations[util.IpAddressAnnotation]
+		ipNewAddr := pod.Annotations[util.IPAddressAnnotation]
 		framework.ExpectEqual(ipAddr, ipNewAddr)
 	})
 })

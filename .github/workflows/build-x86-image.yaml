@@ -21,18 +21,30 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GOSEC_VERSION: '2.15.0'
-  HELM_VERSION: v3.11.1
-  SUBMARINER_VERSION: '0.14.3'
+  GO_VERSION: ''
+  KIND_VERSION: v0.22.0
+  GOSEC_VERSION: '2.19.0'
+  HELM_VERSION: v3.14.1
+  SUBMARINER_VERSION: '0.16.3'
 
 jobs:
   build-kube-ovn-base:
     name: Build kube-ovn-base
     runs-on: ubuntu-22.04
     outputs:
-      build-base: ${{ steps.build.outputs.build-base }}
+      build-base: ${{ steps.check.outputs.build-base }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
@@ -41,42 +53,95 @@ jobs:
           if [ ${{ github.event_name }} != 'pull_request' ]; then
             exit
           fi
-          if git diff --name-only HEAD^ HEAD | grep -q ^dist/images/Dockerfile.base; then
-            echo buildx=1 >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: docker/setup-buildx-action@v2
-        if: steps.check.outputs.buildx == 1
-
-      - name: Build
-        id: build
-        if: steps.check.outputs.buildx == 1
-        run: |
           if git diff --name-only HEAD^ HEAD | grep -q ^dist/images/Dockerfile.base$; then
-            make base-amd64
-            make base-tar-amd64
             echo build-base=1 >> "$GITHUB_OUTPUT"
           fi
-          if git diff --name-only HEAD^ HEAD | grep -q ^dist/images/Dockerfile.base-dpdk$; then
-            make base-amd64-dpdk
-          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.build-base == 1
+
+      - name: Build kube-ovn-base image
+        id: build
+        if: steps.check.outputs.build-base == 1
+        run: |
+            make base-amd64
+            make base-tar-amd64
 
       - name: Upload base images to artifact
-        if: steps.build.outputs.build-base == 1
-        uses: actions/upload-artifact@v3
+        if: steps.check.outputs.build-base == 1
+        uses: actions/upload-artifact@v4
         with:
           name: kube-ovn-base
           path: image-amd64.tar
 
+  build-kube-ovn-dpdk-base:
+    name: Build kube-ovn-dpdk-base
+    runs-on: ubuntu-22.04
+    outputs:
+      build-dpdk-base: ${{ steps.check.outputs.build-dpdk-base }}
+    steps:
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: check
+        run: |
+          if [ ${{ github.event_name }} != 'pull_request' ]; then
+            exit
+          fi
+          if git diff --name-only HEAD^ HEAD | grep -q ^dist/images/Dockerfile.base-dpdk$; then
+            echo build-dpdk-base=1 >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.build-dpdk-base == 1
+
+      - name: Build kube-ovn-dpdk-base image
+        id: build
+        if: steps.check.outputs.build-dpdk-base == 1
+        run: |
+          make base-amd64-dpdk
+          make base-tar-amd64-dpdk
+
+      - name: Upload dpdk base images to artifact
+        if: steps.check.outputs.build-dpdk-base == 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: kube-ovn-dpdk-base
+          path: image-amd64-dpdk.tar
+
   build-kube-ovn:
     name: Build kube-ovn
     runs-on: ubuntu-22.04
-    needs: build-kube-ovn-base
+    needs:
+      - build-kube-ovn-base
+      - build-kube-ovn-dpdk-base
     steps:
-      - uses: actions/checkout@v3
-      - uses: docker/setup-buildx-action@v2
-      - uses: actions/setup-go@v4
+      - uses: jlumbroso/free-disk-space@v1.3.1
         with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -85,7 +150,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -109,13 +174,23 @@ jobs:
 
       - name: Download base images
         if: needs.build-kube-ovn-base.outputs.build-base == 1
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn-base
 
       - name: Load base images
         if: needs.build-kube-ovn-base.outputs.build-base == 1
         run: docker load --input image-amd64.tar
+
+      - name: Download dpdk base images
+        if: needs.build-kube-ovn-dpdk-base.outputs.build-dpdk-base == 1
+        uses: actions/download-artifact@v4
+        with:
+          name: kube-ovn-dpdk-base
+
+      - name: Load dpdk base images
+        if: needs.build-kube-ovn-dpdk-base.outputs.build-dpdk-base == 1
+        run: docker load --input image-amd64-dpdk.tar
 
       - name: Build
         run: |
@@ -125,24 +200,52 @@ jobs:
           if [ ${{ needs.build-kube-ovn-base.outputs.build-base || 0 }} = 1 ]; then
             TAG=$(cat VERSION)
             docker tag kubeovn/kube-ovn-base:$TAG-amd64 kubeovn/kube-ovn-base:$TAG
-            docker tag kubeovn/kube-ovn-base:$TAG-amd64-no-avx512 kubeovn/kube-ovn-base:$TAG-no-avx512
+            docker tag kubeovn/kube-ovn-base:$TAG-debug-amd64 kubeovn/kube-ovn-base:$TAG-debug
             make build-kube-ovn
           else
             make image-kube-ovn
           fi
           make tar-kube-ovn
 
+      - name: Build dpdk
+        run: |
+          if [ ${{ needs.build-kube-ovn-dpdk-base.outputs.build-dpdk-base || 0 }} = 1 ]; then
+            TAG=$(cat VERSION)
+            docker tag kubeovn/kube-ovn-base:$TAG-amd64-dpdk kubeovn/kube-ovn-base:$TAG-dpdk
+            make build-kube-ovn-dpdk
+          else
+            make image-kube-ovn-dpdk
+          fi
+          make tar-kube-ovn-dpdk
+
       - name: Upload images to artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kube-ovn
           path: kube-ovn.tar
+
+      - name: Upload dpdk images to artifact
+        uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: kube-ovn-dpdk
+          path: kube-ovn-dpdk.tar
 
   build-vpc-nat-gateway:
     name: Build vpc-nat-gateway
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Build
         run: |
@@ -150,7 +253,7 @@ jobs:
           make tar-vpc-nat-gateway
 
       - name: Upload image to artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: vpc-nat-gateway
           path: vpc-nat-gateway.tar
@@ -159,8 +262,18 @@ jobs:
     name: Build centos-compile
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
-      - uses: docker/setup-buildx-action@v2
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
 
       - name: Build
         run: |
@@ -168,13 +281,13 @@ jobs:
           make tar-centos-compile
 
       - name: Upload centos7-compile image to artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: centos7-compile
           path: centos7-compile.tar
 
       # - name: Upload centos8-compile image to artifact
-      #   uses: actions/upload-artifact@v3
+      #   uses: actions/upload-artifact@v4
       #   with:
       #     name: centos8-compile
       #     path: centos8-compile.tar
@@ -184,7 +297,17 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -192,7 +315,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -206,8 +329,9 @@ jobs:
             echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -216,7 +340,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -238,9 +362,10 @@ jobs:
     outputs:
       test-netpol: ${{ steps.filter.outputs.kube-ovn-controller }}
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -258,7 +383,7 @@ jobs:
             echo "- $f" | tee -a $filter
           done
 
-      - uses: dorny/paths-filter@v2
+      - uses: dorny/paths-filter@v3
         id: filter
         with:
           base: ${{ github.base_ref || github.ref_name }}
@@ -271,7 +396,7 @@ jobs:
       - build-kube-ovn
       - build-e2e-binaries
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -283,7 +408,17 @@ jobs:
           - overlay
           - underlay
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -291,7 +426,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -310,8 +445,9 @@ jobs:
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -320,17 +456,18 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-${{ hashFiles(format('{0}/**/go.sum', env.E2E_DIR)) }}
+          key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles(format('{0}/**/go.sum', env.E2E_DIR)) }}
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -338,12 +475,15 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
       - name: Load image
         run: docker load --input kube-ovn.tar
+
+      - name: Export debug image tag
+        run: echo "DEBUG_TAG='$(cat VERSION)-debug'" >> "$GITHUB_ENV"
 
       - name: Create kind cluster
         run: |
@@ -354,6 +494,9 @@ jobs:
           sudo chown -R $(id -un). ~/.kube/
 
       - name: Install Kube-OVN
+        env:
+          VERSION: ${{ env.DEBUG_TAG }}
+          DEBUG_WRAPPER: valgrind
         run: make kind-install-${{ matrix.mode }}-${{ matrix.ip-family }}
 
       - name: Run E2E
@@ -365,8 +508,46 @@ jobs:
         run: make k8s-conformance-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz k8s-conformance-e2e-${{ matrix.ip-family }}-${{ matrix.mode }}-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: k8s-conformance-e2e-${{ matrix.ip-family }}-${{ matrix.mode }}-ko-log
+          path: k8s-conformance-e2e-${{ matrix.ip-family }}-${{ matrix.mode }}-ko-log.tar.gz
+
+      - name: Check valgrind result
+        run: |
+          kubectl -n kube-system rollout restart deploy ovn-central
+          kubectl -n kube-system rollout restart ds ovs-ovn
+          kubectl -n kube-system rollout status deploy ovn-central
+          kubectl -n kube-system rollout status ds ovs-ovn
+          while true; do
+            if [ $(kubectl -n kube-system get pod -l app=ovs -o name | wc -l) -eq $(kubectl get node -o name | wc -l) ]; then
+              break
+            fi
+            sleep 1
+          done
+          kubectl ko log ovn
+          kubectl ko log ovs
+
+          for daemon in ovsdb-nb ovsdb-sb ovn-northd ovn-controller ovsdb-server ovs-vswitchd; do
+            echo "Checking if valgrind log file for $daemon exists..."
+            find kubectl-ko-log -type f -name "$daemon.valgrind.log.[[:digit:]]*" -exec false {} + && exit 1
+          done
+
+          find kubectl-ko-log -type f -name '*.valgrind.log.*' | while read f; do
+            if grep -qw 'definitely lost' "$f"; then
+              echo "Memory leak detected in $(basename $f | awk -F. '{print $1}')."
+              echo $f
+              cat "$f"
+              exit 1
+            fi;
+          done
 
   k8s-netpol-e2e:
     name: Kubernetes Network Policy E2E
@@ -378,7 +559,7 @@ jobs:
       - build-e2e-binaries
       - netpol-path-filter
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -387,7 +568,17 @@ jobs:
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -395,7 +586,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -414,8 +605,9 @@ jobs:
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -424,7 +616,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
@@ -433,8 +625,9 @@ jobs:
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -442,12 +635,15 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
       - name: Load image
         run: docker load --input kube-ovn.tar
+
+      - name: Export debug image tag
+        run: echo "DEBUG_TAG='$(cat VERSION)-debug'" >> "$GITHUB_ENV"
 
       - name: Create kind cluster
         run: |
@@ -458,6 +654,9 @@ jobs:
           sudo chown -R $(id -un). ~/.kube/
 
       - name: Install Kube-OVN
+        env:
+          VERSION: ${{ env.DEBUG_TAG }}
+          DEBUG_WRAPPER: valgrind
         run: make kind-install-${{ matrix.ip-family }}
 
       - name: Run E2E
@@ -465,108 +664,46 @@ jobs:
         run: make k8s-netpol-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
-
-  k8s-netpol-legacy-e2e:
-    name: Kubernetes Network Policy Legacy E2E
-    if: |
-      always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') &&
-      (needs.netpol-path-filter.outputs.test-netpol == 1 || contains(github.event.pull_request.labels.*.name, 'network policy'))
-    needs:
-      - build-kube-ovn
-      - build-e2e-binaries
-      - netpol-path-filter
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        ip-family:
-          - ipv4
-          - ipv6
-          - dual
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Create the default branch directory
-        if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        run: mkdir -p test/e2e/source
-
-      - name: Check out the default branch
-        if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 1
-          path: test/e2e/source
-
-      - name: Export E2E directory
+        if: failure()
         run: |
-          if [ '${{ github.base_ref || github.ref_name }}' = '${{ github.event.repository.default_branch }}' ]; then
-            echo "E2E_DIR=." >> "$GITHUB_ENV"
-          else
-            echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
-          fi
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz k8s-netpol-e2e-${{ matrix.ip-family }}-ko-log.tar.gz
 
-      - name: Remove DNS search domain
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: k8s-netpol-e2e-${{ matrix.ip-family }}-ko-log
+          path: k8s-netpol-e2e-${{ matrix.ip-family }}-ko-log.tar.gz
+
+      - name: Check valgrind result
         run: |
-          sudo sed -i '/^search/d' /etc/resolv.conf
-          sudo systemctl restart docker
+          kubectl -n kube-system rollout restart deploy ovn-central
+          kubectl -n kube-system rollout restart ds ovs-ovn
+          kubectl -n kube-system rollout status deploy ovn-central
+          kubectl -n kube-system rollout status ds ovs-ovn
+          while true; do
+            if [ $(kubectl -n kube-system get pod -l app=ovs -o name | wc -l) -eq $(kubectl get node -o name | wc -l) ]; then
+              break
+            fi
+            sleep 1
+          done
+          kubectl ko log ovn
+          kubectl ko log ovs
 
-      - uses: actions/setup-go@v4
-        with:
-          go-version-file: ${{ env.E2E_DIR }}/go.mod
-          check-latest: true
-          cache: false
+          for daemon in ovsdb-nb ovsdb-sb ovn-northd ovn-controller ovsdb-server ovs-vswitchd; do
+            echo "Checking if valgrind log file for $daemon exists..."
+            find kubectl-ko-log -type f -name "$daemon.valgrind.log.[[:digit:]]*" -exec false {} + && exit 1
+          done
 
-      - name: Export Go full version
-        run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
-
-      - name: Go cache
-        uses: actions/cache/restore@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles(format('{0}/**/go.sum', env.E2E_DIR)) }}
-          restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
-
-      - name: Install kind
-        uses: helm/kind-action@v1
-        with:
-          install_only: true
-
-      - name: Install ginkgo
-        working-directory: ${{ env.E2E_DIR }}
-        run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
-
-      - name: Download image
-        uses: actions/download-artifact@v3
-        with:
-          name: kube-ovn
-
-      - name: Load image
-        run: docker load --input kube-ovn.tar
-
-      - name: Create kind cluster
-        run: |
-          sudo pip3 install j2cli
-          sudo pip3 install "j2cli[yaml]"
-          sudo PATH=~/.local/bin:$PATH make kind-init-${{ matrix.ip-family }}
-          sudo cp -r /root/.kube/ ~/.kube/
-          sudo chown -R $(id -un). ~/.kube/
-
-      - name: Install Kube-OVN
-        run: make kind-install-${{ matrix.ip-family }}
-
-      - name: Run E2E
-        working-directory: ${{ env.E2E_DIR }}
-        run: make k8s-netpol-legacy-e2e
-
-      - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+          find kubectl-ko-log -type f -name '*.valgrind.log.*' | while read f; do
+            if grep -qw 'definitely lost' "$f"; then
+              echo "Memory leak detected in $(basename $f | awk -F. '{print $1}')."
+              echo $f
+              cat "$f"
+              exit 1
+            fi;
+          done
 
   cyclonus-netpol-e2e:
     name: Cyclonus Network Policy E2E
@@ -586,7 +723,17 @@ jobs:
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -594,7 +741,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -609,8 +756,9 @@ jobs:
           fi
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -618,12 +766,15 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
       - name: Load image
         run: docker load --input kube-ovn.tar
+
+      - name: Export debug image tag
+        run: echo "DEBUG_TAG='$(cat VERSION)-debug'" >> "$GITHUB_ENV"
 
       - name: Create kind cluster
         run: |
@@ -634,6 +785,9 @@ jobs:
           sudo chown -R $(id -un). ~/.kube/
 
       - name: Install Kube-OVN
+        env:
+          VERSION: ${{ env.DEBUG_TAG }}
+          DEBUG_WRAPPER: valgrind
         run: make kind-install-${{ matrix.ip-family }}
 
       - name: Run E2E
@@ -641,8 +795,46 @@ jobs:
         run: make cyclonus-netpol-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz cyclonus-netpol-e2e-${{ matrix.ip-family }}-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cyclonus-netpol-e2e-${{ matrix.ip-family }}-ko-log
+          path: cyclonus-netpol-e2e-${{ matrix.ip-family }}-ko-log.tar.gz
+
+      - name: Check valgrind result
+        run: |
+          kubectl -n kube-system rollout restart deploy ovn-central
+          kubectl -n kube-system rollout restart ds ovs-ovn
+          kubectl -n kube-system rollout status deploy ovn-central
+          kubectl -n kube-system rollout status ds ovs-ovn
+          while true; do
+            if [ $(kubectl -n kube-system get pod -l app=ovs -o name | wc -l) -eq $(kubectl get node -o name | wc -l) ]; then
+              break
+            fi
+            sleep 1
+          done
+          kubectl ko log ovn
+          kubectl ko log ovs
+
+          for daemon in ovsdb-nb ovsdb-sb ovn-northd ovn-controller ovsdb-server ovs-vswitchd; do
+            echo "Checking if valgrind log file for $daemon exists..."
+            find kubectl-ko-log -type f -name "$daemon.valgrind.log.[[:digit:]]*" -exec false {} + && exit 1
+          done
+
+          find kubectl-ko-log -type f -name '*.valgrind.log.*' | while read f; do
+            if grep -qw 'definitely lost' "$f"; then
+              echo "Memory leak detected in $(basename $f | awk -F. '{print $1}')."
+              echo $f
+              cat "$f"
+              exit 1
+            fi;
+          done
 
   kube-ovn-conformance-e2e:
     name: Kube-OVN Conformance E2E
@@ -650,7 +842,7 @@ jobs:
       - build-kube-ovn
       - build-e2e-binaries
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -658,8 +850,21 @@ jobs:
           - ipv4
           - ipv6
           - dual
+        mode:
+          - overlay
+          - underlay
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -667,7 +872,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -681,8 +886,9 @@ jobs:
             echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -691,7 +897,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
@@ -700,8 +906,9 @@ jobs:
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -709,12 +916,15 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
       - name: Load image
         run: docker load --input kube-ovn.tar
+
+      - name: Export debug image tag
+        run: echo "DEBUG_TAG='$(cat VERSION)-debug'" >> "$GITHUB_ENV"
 
       - name: Create kind cluster
         run: |
@@ -725,21 +935,63 @@ jobs:
           sudo chown -R $(id -un). ~/.kube/
 
       - name: Install Kube-OVN
-        run: make kind-install-${{ matrix.ip-family }}
+        env:
+          VERSION: ${{ env.DEBUG_TAG }}
+          DEBUG_WRAPPER: valgrind
+        run: make kind-install-${{ matrix.mode }}-${{ matrix.ip-family }}
 
       - name: Run E2E
         working-directory: ${{ env.E2E_DIR }}
         env:
           E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
           E2E_IP_FAMILY: ${{ matrix.ip-family }}
+          E2E_NETWORK_MODE: ${{ matrix.mode }}
         run: make kube-ovn-conformance-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz kube-ovn-conformance-e2e-${{ matrix.mode }}-${{ matrix.ip-family }}-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: kube-ovn-conformance-e2e-${{ matrix.mode }}-${{ matrix.ip-family }}-ko-log
+          path: kube-ovn-conformance-e2e-${{ matrix.mode }}-${{ matrix.ip-family }}-ko-log.tar.gz
+
+      - name: Check valgrind result
+        run: |
+          kubectl -n kube-system rollout restart deploy ovn-central
+          kubectl -n kube-system rollout restart ds ovs-ovn
+          kubectl -n kube-system rollout status deploy ovn-central
+          kubectl -n kube-system rollout status ds ovs-ovn
+          while true; do
+            if [ $(kubectl -n kube-system get pod -l app=ovs -o name | wc -l) -eq $(kubectl get node -o name | wc -l) ]; then
+              break
+            fi
+            sleep 1
+          done
+          kubectl ko log ovn
+          kubectl ko log ovs
+
+          for daemon in ovsdb-nb ovsdb-sb ovn-northd ovn-controller ovsdb-server ovs-vswitchd; do
+            echo "Checking if valgrind log file for $daemon exists..."
+            find kubectl-ko-log -type f -name "$daemon.valgrind.log.[[:digit:]]*" -exec false {} + && exit 1
+          done
+
+          find kubectl-ko-log -type f -name '*.valgrind.log.*' | while read f; do
+            if grep -qw 'definitely lost' "$f"; then
+              echo "Memory leak detected in $(basename $f | awk -F. '{print $1}')."
+              echo $f
+              cat "$f"
+              exit 1
+            fi;
+          done
 
       - name: Cleanup
-        run: sh dist/images/cleanup.sh
+        run: sh -x dist/images/cleanup.sh
 
   kube-ovn-ic-conformance-e2e:
     name: Kube-OVN IC Conformance E2E
@@ -747,9 +999,26 @@ jobs:
       - build-kube-ovn
       - build-e2e-binaries
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ip-family:
+          - ipv4
+          - ipv6
+          - dual
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -757,7 +1026,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -771,8 +1040,9 @@ jobs:
             echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -781,7 +1051,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
@@ -790,8 +1060,9 @@ jobs:
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -799,7 +1070,7 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -810,36 +1081,70 @@ jobs:
         run: |
           sudo pip3 install j2cli
           sudo pip3 install "j2cli[yaml]"
-          sudo PATH=~/.local/bin:$PATH make kind-init-ovn-ic
+          sudo PATH=~/.local/bin:$PATH make kind-init-ovn-ic-${{ matrix.ip-family }}
           sudo cp -r /root/.kube/ ~/.kube/
           sudo chown -R $(id -un). ~/.kube/
 
       - name: Install Kube-OVN
-        run: make kind-install-ovn-ic
+        run: make kind-install-ovn-ic-${{ matrix.ip-family }}
 
       - name: Run E2E
         working-directory: ${{ env.E2E_DIR }}
+        env:
+          E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
+          E2E_IP_FAMILY: ${{ matrix.ip-family }}
         run: make kube-ovn-ic-conformance-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          for cluster in `kind get clusters`; do
+            kubectl config use-context kind-$cluster
+            make kubectl-ko-log
+            mv kubectl-ko-log.tar.gz kube-ovn-ic-conformance-e2e-${{ matrix.ip-family }}-$cluster-ko-log.tar.gz
+          done
+          tar zcvf kube-ovn-ic-conformance-e2e-${{ matrix.ip-family }}-ko-log.tar.gz \
+            `kind get clusters | xargs -I {} echo kube-ovn-ic-conformance-e2e-${{ matrix.ip-family }}-{}-ko-log.tar.gz`
 
-  chart-installation-test:
-    name: Chart Installation Test
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: kube-ovn-ic-conformance-e2e-${{ matrix.ip-family }}-ko-log
+          path: kube-ovn-ic-conformance-e2e-${{ matrix.ip-family }}-ko-log.tar.gz
+
+  chart-test:
+    name: Chart Installation/Uninstallation Test
     needs: build-kube-ovn
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ssl:
+          - "true"
+          - "false"
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -855,10 +1160,12 @@ jobs:
           sudo chown -R $(id -un). ~/.kube/
 
       - name: Install Kube-OVN
+        env:
+          ENABLE_SSL: "${{ matrix.ssl }}"
         run: make kind-install-chart
 
-      - name: Cleanup
-        run: sh dist/images/cleanup.sh
+      - name: Uninstall Kube-OVN
+        run: make kind-uninstall-chart
 
   underlay-logical-gateway-installation-test:
     name: Underlay Logical Gateway Installation Test
@@ -866,15 +1173,26 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -893,7 +1211,7 @@ jobs:
         run: make kind-install-underlay-logical-gateway-dual
 
       - name: Cleanup
-        run: sh dist/images/cleanup.sh
+        run: sh -x dist/images/cleanup.sh
 
   no-ovn-lb-test:
     name: Disable OVN LB Test
@@ -901,15 +1219,26 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -930,7 +1259,7 @@ jobs:
         run: make kind-install
 
       - name: Cleanup
-        run: sh dist/images/cleanup.sh
+        run: sh -x dist/images/cleanup.sh
 
   no-np-test:
     name: Disable Network Policy Test
@@ -938,15 +1267,26 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -967,7 +1307,7 @@ jobs:
         run: make kind-install
 
       - name: Cleanup
-        run: sh dist/images/cleanup.sh
+        run: sh -x dist/images/cleanup.sh
 
   lb-svc-e2e:
     name: LB Service E2E
@@ -978,7 +1318,17 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -986,7 +1336,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -1000,8 +1350,9 @@ jobs:
             echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -1010,7 +1361,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
@@ -1019,8 +1370,9 @@ jobs:
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -1028,12 +1380,12 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download kube-ovn image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
       - name: Download vpc-nat-gateway image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: vpc-nat-gateway
 
@@ -1050,26 +1402,34 @@ jobs:
           sudo cp -r /root/.kube/ ~/.kube/
           sudo chown -R $(id -un). ~/.kube/
 
-      - name: Install Multus
-        run: make kind-install-multus
-
-      - name: Install Kube-OVN
+      - name: Install Multus and Kube-OVN
         run: make kind-install-lb-svc
 
       - name: Run E2E
         working-directory: ${{ env.E2E_DIR }}
+        env:
+          E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
         run: make kube-ovn-lb-svc-conformance-e2e
 
-
   kubevirt-e2e:
-    name: Kubevirt vm E2E
+    name: Kubevirt VM E2E
     needs:
       - build-kube-ovn
       - build-e2e-binaries
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -1077,7 +1437,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -1091,8 +1451,9 @@ jobs:
             echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -1101,7 +1462,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
@@ -1110,8 +1471,9 @@ jobs:
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -1119,7 +1481,7 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download kube-ovn image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -1135,11 +1497,13 @@ jobs:
           sudo cp -r /root/.kube/ ~/.kube/
           sudo chown -R $(id -un). ~/.kube/
 
-      - name: Install Kube-OVN
+      - name: Install Kube-OVN and KubeVirt
         run: make kind-install-kubevirt
 
       - name: Run E2E
         working-directory: ${{ env.E2E_DIR }}
+        env:
+          E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
         run: make kube-ovn-kubevirt-e2e
 
   webhook-e2e:
@@ -1150,7 +1514,17 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -1158,7 +1532,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -1172,8 +1546,9 @@ jobs:
             echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -1182,7 +1557,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
@@ -1191,8 +1566,9 @@ jobs:
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -1200,7 +1576,7 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download kube-ovn image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -1221,11 +1597,22 @@ jobs:
 
       - name: Run E2E
         working-directory: ${{ env.E2E_DIR }}
+        env:
+          E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
         run: make kube-ovn-webhook-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz webhook-e2e-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: webhook-e2e-ko-log
+          path: webhook-e2e-ko-log.tar.gz
 
   installation-compatibility-test:
     name: Installation Compatibility Test
@@ -1233,15 +1620,26 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -1252,7 +1650,7 @@ jobs:
         run: |
           sudo pip3 install j2cli
           sudo pip3 install "j2cli[yaml]"
-          sudo PATH=~/.local/bin:$PATH k8s_version=v1.23.13 make kind-init
+          sudo PATH=~/.local/bin:$PATH k8s_version=v1.23.17 make kind-init
           sudo cp -r /root/.kube/ ~/.kube/
           sudo chown -R $(id -un). ~/.kube/
 
@@ -1260,11 +1658,20 @@ jobs:
         run: make kind-install
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz installation-compatibility-test-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: installation-compatibility-test-ko-log
+          path: installation-compatibility-test-ko-log.tar.gz
 
       - name: Cleanup
-        run: sh dist/images/cleanup.sh
+        run: sh -x dist/images/cleanup.sh
 
   cilium-chaining-e2e:
     name: Cilium Chaining E2E
@@ -1273,9 +1680,26 @@ jobs:
       - build-e2e-binaries
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ip-family:
+          - ipv4
+          # - ipv6
+          # - dual
     steps:
-      - uses: actions/checkout@v3
-      - uses: azure/setup-helm@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4.0.0
         with:
           version: '${{ env.HELM_VERSION }}'
 
@@ -1285,7 +1709,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -1304,8 +1728,9 @@ jobs:
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -1314,7 +1739,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
@@ -1323,8 +1748,9 @@ jobs:
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -1332,7 +1758,7 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -1343,33 +1769,44 @@ jobs:
         run: |
           sudo pip3 install j2cli
           sudo pip3 install "j2cli[yaml]"
-          sudo PATH=~/.local/bin:$PATH make kind-init
+          sudo PATH=~/.local/bin:$PATH make kind-init-cilium-chaining-${{ matrix.ip-family }}
           sudo cp -r /root/.kube/ ~/.kube/
           sudo chown -R $(id -un). ~/.kube/
 
       - name: Install Kube-OVN with Cilium chaining
-        run: make kind-install-cilium-chaining
+        run: make kind-install-cilium-chaining-${{ matrix.ip-family }}
 
       - name: Run E2E
         working-directory: ${{ env.E2E_DIR }}
         env:
           E2E_CILIUM_CHAINING: "true"
+          E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
+          E2E_IP_FAMILY: ${{ matrix.ip-family }}
         run: make k8s-conformance-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz cilium-chaining-e2e-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cilium-chaining-e2e-ko-log
+          path: cilium-chaining-e2e-ko-log.tar.gz
 
       - name: Cleanup
-        run: sh dist/images/cleanup.sh
+        run: sh -x dist/images/cleanup.sh
 
-  kube-ovn-security-e2e:
-    name: Kube-OVN Security E2E
+  kube-ovn-ha-e2e:
+    name: Kube-OVN HA E2E
     needs:
       - build-kube-ovn
       - build-e2e-binaries
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -1384,7 +1821,17 @@ jobs:
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -1392,7 +1839,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -1406,8 +1853,9 @@ jobs:
             echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
           fi
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: ${{ env.E2E_DIR }}/go.mod
           check-latest: true
           cache: false
@@ -1416,7 +1864,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache/restore@v3
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cache/go-build
@@ -1425,8 +1873,9 @@ jobs:
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -1434,7 +1883,7 @@ jobs:
         run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -1450,121 +1899,55 @@ jobs:
           sudo chown -R $(id -un). ~/.kube/
 
       - name: Install Kube-OVN
-        run: |
-          sudo ENABLE_SSL=${{ matrix.ssl }} ENABLE_BIND_LOCAL_IP=${{ matrix.bind-local }} \
-            make kind-install-${{ matrix.ip-family }}
+        env:
+          NET_STACK: "${{ matrix.ip-family }}"
+          ENABLE_SSL: "${{ matrix.ssl }}"
+          ENABLE_BIND_LOCAL_IP: "${{ matrix.bind-local }}"
+        run: make kind-install-chart
 
       - name: Run E2E
         working-directory: ${{ env.E2E_DIR }}
         env:
           E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
           E2E_IP_FAMILY: ${{ matrix.ip-family }}
-        run: make kube-ovn-security-e2e
+        run: |
+          make kube-ovn-security-e2e
+          make kube-ovn-ha-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz kube-ovn-ha-e2e-${{ matrix.ssl }}-${{ matrix.bind-local }}-${{ matrix.ip-family }}-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: kube-ovn-ha-e2e-${{ matrix.ssl }}-${{ matrix.bind-local }}-${{ matrix.ip-family }}-ko-log
+          path: kube-ovn-ha-e2e-${{ matrix.ssl }}-${{ matrix.bind-local }}-${{ matrix.ip-family }}-ko-log.tar.gz
 
       - name: Cleanup
-        run: sh dist/images/cleanup.sh
-
-  push:
-    name: Push Images
-    needs:
-      - build-centos-compile
-      - k8s-conformance-e2e
-      - k8s-netpol-e2e
-      - k8s-netpol-legacy-e2e
-      - cyclonus-netpol-e2e
-      - kube-ovn-conformance-e2e
-      - kube-ovn-ic-conformance-e2e
-      - lb-svc-e2e
-      - underlay-logical-gateway-installation-test
-      - chart-installation-test
-      - installation-compatibility-test
-      - no-ovn-lb-test
-      - no-np-test
-      - cilium-chaining-e2e
-      - kube-ovn-security-e2e
-      - kubevirt-e2e
-    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download kube-ovn image
-        uses: actions/download-artifact@v3
-        with:
-          name: kube-ovn
-
-      - name: Download vpc-nat-gateway image
-        uses: actions/download-artifact@v3
-        with:
-          name: vpc-nat-gateway
-
-      - name: Download centos7-compile image
-        uses: actions/download-artifact@v3
-        with:
-          name: centos7-compile
-
-      # - name: Download centos8-compile image
-      #   uses: actions/download-artifact@v3
-      #   with:
-      #     name: centos8-compile
-
-      - name: Load image
-        run: |
-          docker load --input kube-ovn.tar
-          docker load --input vpc-nat-gateway.tar
-          docker load --input centos7-compile.tar
-          # docker load --input centos8-compile.tar
-
-      - name: Security Scan
-        run: |
-          sudo apt-get install wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install trivy
-          make scan
-
-      - name: Push
-        if: github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'release-')
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-          COMMIT: ${{ github.sha }}
-        run: |
-          cat VERSION
-          TAG=$(cat VERSION)
-          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-          docker tag kubeovn/kube-ovn:$TAG kubeovn/kube-ovn-dev:$COMMIT-x86
-          docker tag kubeovn/kube-ovn:$TAG kubeovn/kube-ovn:$TAG-x86
-          docker tag kubeovn/vpc-nat-gateway:$TAG kubeovn/vpc-nat-gateway-dev:$COMMIT-x86
-          docker tag kubeovn/vpc-nat-gateway:$TAG kubeovn/vpc-nat-gateway:$TAG-x86
-          docker tag kubeovn/centos7-compile:$TAG kubeovn/centos7-compile-dev:$TAG-x86
-          docker tag kubeovn/centos7-compile:$TAG kubeovn/centos7-compile:$TAG-x86
-          # docker tag kubeovn/centos8-compile:$TAG kubeovn/centos8-compile-dev:$TAG-x86
-          # docker tag kubeovn/centos8-compile:$TAG kubeovn/centos8-compile:$TAG-x86
-          docker images
-          docker push kubeovn/kube-ovn:$TAG-x86
-          docker push kubeovn/kube-ovn:$TAG-no-avx512
-          docker push kubeovn/kube-ovn-dev:$COMMIT-x86
-          docker push kubeovn/vpc-nat-gateway:$TAG-x86
-          docker push kubeovn/vpc-nat-gateway-dev:$COMMIT-x86
-          docker push kubeovn/centos7-compile:$TAG-x86
-          docker push kubeovn/centos7-compile-dev:$TAG-x86
-          # docker push kubeovn/centos8-compile:$TAG-x86
-          # docker push kubeovn/centos8-compile-dev:$TAG-x86
+        run: sh -x dist/images/cleanup.sh
 
   kube-ovn-submariner-conformance-e2e:
     name: Kube-OVN Submariner Conformance E2E
     needs:
       - build-kube-ovn
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v3
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
 
       - name: Create the default branch directory
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
@@ -1572,7 +1955,7 @@ jobs:
 
       - name: Check out the default branch
         if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
@@ -1587,8 +1970,9 @@ jobs:
           fi
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install submariner subctl
@@ -1598,7 +1982,7 @@ jobs:
         run: curl -Ls https://get.submariner.io | bash
 
       - name: Download image
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: kube-ovn
 
@@ -1621,8 +2005,346 @@ jobs:
         run: make kube-ovn-submariner-conformance-e2e
 
       - name: kubectl ko log
-        if: failure() && steps.e2e.outcome != 'success'
-        run: make kubectl-ko-log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz kube-ovn-submariner-conformance-e2e-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: kube-ovn-submariner-conformance-e2e-ko-log
+          path: kube-ovn-submariner-conformance-e2e-ko-log.tar.gz
 
       - name: Cleanup
-        run: sh dist/images/cleanup.sh
+        run: sh -x dist/images/cleanup.sh
+
+  iptables-vpc-nat-gw-conformance-e2e:
+    name: Iptables VPC NAT Gateway E2E
+    needs:
+      - build-kube-ovn
+      - build-vpc-nat-gateway
+      - build-e2e-binaries
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+
+      - name: Create the default branch directory
+        if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
+        run: mkdir -p test/e2e/source
+
+      - name: Check out the default branch
+        if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          path: test/e2e/source
+
+      - name: Export E2E directory
+        run: |
+          if [ '${{ github.base_ref || github.ref_name }}' = '${{ github.event.repository.default_branch }}' ]; then
+            echo "E2E_DIR=." >> "$GITHUB_ENV"
+          else
+            echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION || '' }}
+          go-version-file: ${{ env.E2E_DIR }}/go.mod
+          check-latest: true
+          cache: false
+
+      - name: Export Go full version
+        run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
+
+      - name: Go cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles(format('{0}/**/go.sum', env.E2E_DIR)) }}
+          restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
+
+      - name: Install kind
+        uses: helm/kind-action@v1.9.0
+        with:
+          version: ${{ env.KIND_VERSION }}
+          install_only: true
+
+      - name: Install ginkgo
+        working-directory: ${{ env.E2E_DIR }}
+        run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
+
+      - name: Download kube-ovn image
+        uses: actions/download-artifact@v4
+        with:
+          name: kube-ovn
+
+      - name: Download vpc-nat-gateway image
+        uses: actions/download-artifact@v4
+        with:
+          name: vpc-nat-gateway
+
+      - name: Load images
+        run: |
+          docker load -i kube-ovn.tar
+          docker load -i vpc-nat-gateway.tar
+
+      - name: Create kind cluster
+        run: |
+          sudo pip3 install j2cli
+          sudo pip3 install "j2cli[yaml]"
+          sudo PATH=~/.local/bin:$PATH make kind-init
+          sudo cp -r /root/.kube/ ~/.kube/
+          sudo chown -R $(id -un). ~/.kube/
+
+      - name: Install Kube-OVN with VPC NAT gateway enabled
+        run: make kind-install-vpc-nat-gw
+
+      - name: Run E2E
+        working-directory: ${{ env.E2E_DIR }}
+        env:
+          E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: make iptables-vpc-nat-gw-conformance-e2e
+
+      - name: kubectl ko log
+        if: failure()
+        run: |
+          make kubectl-ko-log
+          mv kubectl-ko-log.tar.gz iptables-vpc-nat-gw-conformance-e2e-ko-log.tar.gz
+
+      - name: upload kubectl ko log
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: iptables-vpc-nat-gw-conformance-e2e-ko-log
+          path: iptables-vpc-nat-gw-conformance-e2e-ko-log.tar.gz
+
+  ovn-vpc-nat-gw-conformance-e2e:
+    name: OVN VPC NAT Gateway E2E
+    needs:
+      - build-kube-ovn
+      - build-e2e-binaries
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+
+      - name: Create the default branch directory
+        if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
+        run: mkdir -p test/e2e/source
+
+      - name: Check out the default branch
+        if: (github.base_ref || github.ref_name) != github.event.repository.default_branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          path: test/e2e/source
+
+      - name: Export E2E directory
+        run: |
+          if [ '${{ github.base_ref || github.ref_name }}' = '${{ github.event.repository.default_branch }}' ]; then
+            echo "E2E_DIR=." >> "$GITHUB_ENV"
+          else
+            echo "E2E_DIR=test/e2e/source" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION || '' }}
+          go-version-file: ${{ env.E2E_DIR }}/go.mod
+          check-latest: true
+          cache: false
+
+      - name: Export Go full version
+        run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
+
+      - name: Go cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles(format('{0}/**/go.sum', env.E2E_DIR)) }}
+          restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
+
+      - name: Install kind
+        uses: helm/kind-action@v1.9.0
+        with:
+          version: ${{ env.KIND_VERSION }}
+          install_only: true
+
+      - name: Install ginkgo
+        working-directory: ${{ env.E2E_DIR }}
+        run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
+
+      - name: Download kube-ovn image
+        uses: actions/download-artifact@v4
+        with:
+          name: kube-ovn
+
+      - name: Load images
+        run: docker load -i kube-ovn.tar
+
+      - name: Create kind cluster
+        run: |
+          sudo pip3 install j2cli
+          sudo pip3 install "j2cli[yaml]"
+          sudo PATH=~/.local/bin:$PATH make kind-init
+          sudo cp -r /root/.kube/ ~/.kube/
+          sudo chown -R $(id -un). ~/.kube/
+
+      - name: Install Kube-OVN
+        run: make kind-install
+
+      - name: Run Vip E2E
+        working-directory: ${{ env.E2E_DIR }}
+        env:
+          E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: make vip-conformance-e2e
+
+      - name: Run Ovn VPC NAT GW E2E
+        working-directory: ${{ env.E2E_DIR }}
+        env:
+          E2E_BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: make ovn-vpc-nat-gw-conformance-e2e
+
+  push:
+    name: Push Images
+    needs:
+      - build-centos-compile
+      - k8s-conformance-e2e
+      - k8s-netpol-e2e
+      - cyclonus-netpol-e2e
+      - kube-ovn-conformance-e2e
+      - kube-ovn-ic-conformance-e2e
+      - ovn-vpc-nat-gw-conformance-e2e
+      - iptables-vpc-nat-gw-conformance-e2e
+      - webhook-e2e
+      - lb-svc-e2e
+      - underlay-logical-gateway-installation-test
+      - chart-test
+      - installation-compatibility-test
+      - no-ovn-lb-test
+      - no-np-test
+      - cilium-chaining-e2e
+      - kube-ovn-ha-e2e
+      - kubevirt-e2e
+      - kube-ovn-submariner-conformance-e2e
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          docker-images: false
+          large-packages: false
+          tool-cache: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+
+      - name: Download kube-ovn image
+        uses: actions/download-artifact@v4
+        with:
+          name: kube-ovn
+
+      - name: Download kube-ovn-dpdk image
+        uses: actions/download-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: kube-ovn-dpdk
+
+      - name: Download vpc-nat-gateway image
+        uses: actions/download-artifact@v4
+        with:
+          name: vpc-nat-gateway
+
+      - name: Download centos7-compile image
+        uses: actions/download-artifact@v4
+        with:
+          name: centos7-compile
+
+      # - name: Download centos8-compile image
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: centos8-compile
+
+      - name: Load image
+        run: |
+          docker load --input kube-ovn.tar
+          docker load --input vpc-nat-gateway.tar
+          docker load --input centos7-compile.tar
+          # docker load --input centos8-compile.tar
+          if [ '${{ github.event_name }}' != 'pull_request' ]; then
+            docker load --input kube-ovn-dpdk.tar
+          fi
+
+      - name: Security Scan
+        run: |
+          sudo apt-get install wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy
+          make scan
+
+      - name: Push
+        if: github.ref_name == github.event.repository.default_branch || startsWith(github.ref_name, 'release-')
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          cat VERSION
+          TAG=$(cat VERSION)
+          echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+          docker tag kubeovn/kube-ovn:$TAG kubeovn/kube-ovn-dev:$COMMIT-x86
+          docker tag kubeovn/kube-ovn:$TAG kubeovn/kube-ovn:$TAG-x86
+          docker tag kubeovn/kube-ovn:$TAG-debug kubeovn/kube-ovn:$TAG-debug-x86
+          docker tag kubeovn/kube-ovn:$TAG-dpdk kubeovn/kube-ovn:$TAG-dpdk-x86
+          docker tag kubeovn/vpc-nat-gateway:$TAG kubeovn/vpc-nat-gateway-dev:$COMMIT-x86
+          docker tag kubeovn/vpc-nat-gateway:$TAG kubeovn/vpc-nat-gateway:$TAG-x86
+          docker tag kubeovn/centos7-compile:$TAG kubeovn/centos7-compile-dev:$TAG-x86
+          docker tag kubeovn/centos7-compile:$TAG kubeovn/centos7-compile:$TAG-x86
+          # docker tag kubeovn/centos8-compile:$TAG kubeovn/centos8-compile-dev:$TAG-x86
+          # docker tag kubeovn/centos8-compile:$TAG kubeovn/centos8-compile:$TAG-x86
+          docker images
+          docker push kubeovn/kube-ovn:$TAG-x86
+          docker push kubeovn/kube-ovn-dev:$COMMIT-x86
+          docker push kubeovn/kube-ovn:$TAG-debug-x86
+          docker push kubeovn/kube-ovn:$TAG-dpdk-x86
+          docker push kubeovn/vpc-nat-gateway:$TAG-x86
+          docker push kubeovn/vpc-nat-gateway-dev:$COMMIT-x86
+          docker push kubeovn/centos7-compile:$TAG-x86
+          docker push kubeovn/centos7-compile-dev:$TAG-x86
+          # docker push kubeovn/centos8-compile:$TAG-x86
+          # docker push kubeovn/centos8-compile-dev:$TAG-x86

@@ -5,8 +5,10 @@ import (
 	"os"
 	"path"
 
-	"github.com/kubeovn/kube-ovn/pkg/util"
 	"golang.org/x/sys/unix"
+	"k8s.io/klog/v2"
+
+	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
 // NsHandle is a handle to a network namespace. It can be cast directly
@@ -54,6 +56,7 @@ func DeleteNamedNs(name string) error {
 	}
 	err := unix.Unmount(namedPath, unix.MNT_DETACH)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 

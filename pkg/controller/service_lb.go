@@ -18,11 +18,11 @@ import (
 )
 
 const (
-	INIT_ROUTE_TABLE = "init"
-	POD_EIP_ADD      = "eip-add"
-	POD_DNAT_ADD     = "dnat-add"
-	ATTACHMENT_NAME  = "lb-svc-attachment"
-	ATTACHMENT_NS    = "kube-system"
+	initRouteTable = "init"
+	podEIPAdd      = "eip-add"
+	podDNATAdd     = "dnat-add"
+	attachmentName = "lb-svc-attachment"
+	attachmentNs   = "kube-system"
 )
 
 func genLbSvcDpName(name string) string {
@@ -30,7 +30,7 @@ func genLbSvcDpName(name string) string {
 }
 
 func getAttachNetworkProvider(svc *corev1.Service) string {
-	providerName := fmt.Sprintf("%s.%s", ATTACHMENT_NAME, ATTACHMENT_NS)
+	providerName := fmt.Sprintf("%s.%s", attachmentName, attachmentNs)
 	if svc.Annotations[util.AttachmentProvider] != "" {
 		providerName = svc.Annotations[util.AttachmentProvider]
 	}
@@ -67,6 +67,10 @@ func (c *Controller) checkAttachNetwork(svc *corev1.Service) error {
 }
 
 func (c *Controller) genLbSvcDeployment(svc *corev1.Service) (dp *v1.Deployment) {
+	if err := c.resyncVpcNatImage(); err != nil {
+		klog.Errorf("failed to resync vpc nat config, err: %v", err)
+		return nil
+	}
 	replicas := int32(1)
 	name := genLbSvcDpName(svc.Name)
 	allowPrivilegeEscalation := true
@@ -77,21 +81,16 @@ func (c *Controller) genLbSvcDeployment(svc *corev1.Service) (dp *v1.Deployment)
 		"service":   svc.Name,
 	}
 
-	image := "kubeovn/vpc-nat-gateway:v1.12.0"
-	if svc.Annotations[util.LbSvcPodImg] != "" {
-		image = svc.Annotations[util.LbSvcPodImg]
-	}
-
 	attachmentName, attachmentNs := parseAttachNetworkProvider(svc)
 	providerName := getAttachNetworkProvider(svc)
 	attachSubnetAnnotation := fmt.Sprintf(util.LogicalSwitchAnnotationTemplate, providerName)
-	attachIpAnnotation := fmt.Sprintf(util.IpAddressAnnotationTemplate, providerName)
+	attachIPAnnotation := fmt.Sprintf(util.IPAddressAnnotationTemplate, providerName)
 	podAnnotations := map[string]string{
 		util.AttachmentNetworkAnnotation: fmt.Sprintf("%s/%s", attachmentNs, attachmentName),
 		attachSubnetAnnotation:           svc.Annotations[attachSubnetAnnotation],
 	}
 	if svc.Spec.LoadBalancerIP != "" {
-		podAnnotations[attachIpAnnotation] = svc.Spec.LoadBalancerIP
+		podAnnotations[attachIPAnnotation] = svc.Spec.LoadBalancerIP
 	}
 	if v, ok := svc.Annotations[util.LogicalSwitchAnnotation]; ok {
 		podAnnotations[util.LogicalSwitchAnnotation] = v
@@ -115,7 +114,7 @@ func (c *Controller) genLbSvcDeployment(svc *corev1.Service) (dp *v1.Deployment)
 					Containers: []corev1.Container{
 						{
 							Name:            "lb-svc",
-							Image:           image,
+							Image:           vpcNatImage,
 							Command:         []string{"bash"},
 							Args:            []string{"-c", "while true; do sleep 10000; done"},
 							ImagePullPolicy: corev1.PullIfNotPresent,
@@ -139,13 +138,13 @@ func (c *Controller) updateLbSvcDeployment(svc *corev1.Service, dp *v1.Deploymen
 	attachmentName, attachmentNs := parseAttachNetworkProvider(svc)
 	providerName := getAttachNetworkProvider(svc)
 	attachSubnetAnnotation := fmt.Sprintf(util.LogicalSwitchAnnotationTemplate, providerName)
-	attachIpAnnotation := fmt.Sprintf(util.IpAddressAnnotationTemplate, providerName)
+	attachIPAnnotation := fmt.Sprintf(util.IPAddressAnnotationTemplate, providerName)
 	podAnnotations := map[string]string{
 		util.AttachmentNetworkAnnotation: fmt.Sprintf("%s/%s", attachmentNs, attachmentName),
 		attachSubnetAnnotation:           svc.Annotations[attachSubnetAnnotation],
 	}
 	if svc.Spec.LoadBalancerIP != "" {
-		podAnnotations[attachIpAnnotation] = svc.Spec.LoadBalancerIP
+		podAnnotations[attachIPAnnotation] = svc.Spec.LoadBalancerIP
 	}
 	dp.Spec.Template.Annotations = podAnnotations
 
@@ -160,6 +159,7 @@ func (c *Controller) createLbSvcPod(svc *corev1.Service) error {
 		if k8serrors.IsNotFound(err) {
 			needToCreate = true
 		} else {
+			klog.Error(err)
 			return err
 		}
 	}
@@ -187,15 +187,17 @@ func (c *Controller) getLbSvcPod(svcName, svcNamespace string) (*corev1.Pod, err
 	})
 
 	pods, err := c.podsLister.Pods(svcNamespace).List(sel)
-	if err != nil {
+	switch {
+	case err != nil:
+		klog.Error(err)
 		return nil, err
-	} else if len(pods) == 0 {
+	case len(pods) == 0:
 		time.Sleep(2 * time.Second)
 		return nil, fmt.Errorf("pod '%s' not exist", genLbSvcDpName(svcName))
-	} else if len(pods) != 1 {
+	case len(pods) != 1:
 		time.Sleep(2 * time.Second)
 		return nil, fmt.Errorf("too many pod")
-	} else if pods[0].Status.Phase != "Running" {
+	case pods[0].Status.Phase != "Running":
 		time.Sleep(2 * time.Second)
 		return nil, fmt.Errorf("pod is not active now")
 	}
@@ -232,10 +234,10 @@ func (c *Controller) getPodAttachIP(pod *corev1.Pod, svc *corev1.Service) (strin
 	var err error
 
 	providerName := getAttachNetworkProvider(svc)
-	attachIpAnnotation := fmt.Sprintf(util.IpAddressAnnotationTemplate, providerName)
+	attachIPAnnotation := fmt.Sprintf(util.IPAddressAnnotationTemplate, providerName)
 
-	if pod.Annotations[attachIpAnnotation] != "" {
-		loadBalancerIP = pod.Annotations[attachIpAnnotation]
+	if pod.Annotations[attachIPAnnotation] != "" {
+		loadBalancerIP = pod.Annotations[attachIPAnnotation]
 	} else {
 		err = fmt.Errorf("failed to get attachment ip from pod's annotation")
 	}
@@ -247,10 +249,9 @@ func (c *Controller) deleteLbSvc(svc *corev1.Service) error {
 	if err := c.config.KubeClient.AppsV1().Deployments(svc.Namespace).Delete(context.Background(), genLbSvcDpName(svc.Name), metav1.DeleteOptions{}); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return nil
-		} else {
-			klog.Errorf("failed to delete deployment %s, err: %v", genLbSvcDpName(svc.Name), err)
-			return err
 		}
+		klog.Errorf("failed to delete deployment %s, err: %v", genLbSvcDpName(svc.Name), err)
+		return err
 	}
 
 	return nil
@@ -260,7 +261,6 @@ func (c *Controller) execNatRules(pod *corev1.Pod, operation string, rules []str
 	cmd := fmt.Sprintf("bash /kube-ovn/lb-svc.sh %s %s", operation, strings.Join(rules, " "))
 	klog.V(3).Infof(cmd)
 	stdOutput, errOutput, err := util.ExecuteCommandInContainer(c.config.KubeClient, c.config.KubeRestConfig, pod.Namespace, pod.Name, "lb-svc", []string{"/bin/bash", "-c", cmd}...)
-
 	if err != nil {
 		if len(errOutput) > 0 {
 			klog.Errorf("failed to ExecuteCommandInContainer, errOutput: %v", errOutput)
@@ -268,6 +268,7 @@ func (c *Controller) execNatRules(pod *corev1.Pod, operation string, rules []str
 		if len(stdOutput) > 0 {
 			klog.V(3).Infof("failed to ExecuteCommandInContainer, stdOutput: %v", stdOutput)
 		}
+		klog.Error(err)
 		return err
 	}
 
@@ -283,13 +284,13 @@ func (c *Controller) execNatRules(pod *corev1.Pod, operation string, rules []str
 }
 
 func (c *Controller) updatePodAttachNets(pod *corev1.Pod, svc *corev1.Service) error {
-	if err := c.execNatRules(pod, INIT_ROUTE_TABLE, []string{}); err != nil {
+	if err := c.execNatRules(pod, initRouteTable, []string{}); err != nil {
 		klog.Errorf("failed to init route table, err: %v", err)
 		return err
 	}
 
 	providerName := getAttachNetworkProvider(svc)
-	attachIpAnnotation := fmt.Sprintf(util.IpAddressAnnotationTemplate, providerName)
+	attachIPAnnotation := fmt.Sprintf(util.IPAddressAnnotationTemplate, providerName)
 	attachCidrAnnotation := fmt.Sprintf(util.CidrAnnotationTemplate, providerName)
 	attachGatewayAnnotation := fmt.Sprintf(util.GatewayAnnotationTemplate, providerName)
 
@@ -297,13 +298,16 @@ func (c *Controller) updatePodAttachNets(pod *corev1.Pod, svc *corev1.Service) e
 		return fmt.Errorf("failed to get attachment network info for pod %s", pod.Name)
 	}
 
-	loadBalancerIP := pod.Annotations[attachIpAnnotation]
-	ipAddr := util.GetIpAddrWithMask(loadBalancerIP, pod.Annotations[attachCidrAnnotation])
-
+	loadBalancerIP := pod.Annotations[attachIPAnnotation]
+	ipAddr, err := util.GetIPAddrWithMask(loadBalancerIP, pod.Annotations[attachCidrAnnotation])
+	if err != nil {
+		klog.Errorf("failed to get ip addr with mask, err: %v", err)
+		return err
+	}
 	var addRules []string
 	addRules = append(addRules, fmt.Sprintf("%s,%s", ipAddr, pod.Annotations[attachGatewayAnnotation]))
 	klog.Infof("add eip rules for lb svc pod, %v", addRules)
-	if err := c.execNatRules(pod, POD_EIP_ADD, addRules); err != nil {
+	if err := c.execNatRules(pod, podEIPAdd, addRules); err != nil {
 		klog.Errorf("failed to add eip for pod, err: %v", err)
 		return err
 	}
@@ -321,9 +325,9 @@ func (c *Controller) updatePodAttachNets(pod *corev1.Pod, svc *corev1.Service) e
 		}
 
 		var rules []string
-		rules = append(rules, fmt.Sprintf("%s,%d,%s,%s,%d,%s", loadBalancerIP, port.Port, protocol, svc.Spec.ClusterIP, port.TargetPort.IntVal, defaultGateway))
+		rules = append(rules, fmt.Sprintf("%s,%d,%s,%s,%d,%s", loadBalancerIP, port.Port, protocol, svc.Spec.ClusterIP, port.Port, defaultGateway))
 		klog.Infof("add dnat rules for lb svc pod, %v", rules)
-		if err := c.execNatRules(pod, POD_DNAT_ADD, rules); err != nil {
+		if err := c.execNatRules(pod, podDNATAdd, rules); err != nil {
 			klog.Errorf("failed to add dnat for pod, err: %v", err)
 			return err
 		}

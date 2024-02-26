@@ -32,6 +32,10 @@ func (c *FakeKubeovnV1) IPs() v1.IPInterface {
 	return &FakeIPs{c}
 }
 
+func (c *FakeKubeovnV1) IPPools() v1.IPPoolInterface {
+	return &FakeIPPools{c}
+}
+
 func (c *FakeKubeovnV1) IptablesDnatRules() v1.IptablesDnatRuleInterface {
 	return &FakeIptablesDnatRules{c}
 }
@@ -48,6 +52,10 @@ func (c *FakeKubeovnV1) IptablesSnatRules() v1.IptablesSnatRuleInterface {
 	return &FakeIptablesSnatRules{c}
 }
 
+func (c *FakeKubeovnV1) OvnDnatRules() v1.OvnDnatRuleInterface {
+	return &FakeOvnDnatRules{c}
+}
+
 func (c *FakeKubeovnV1) OvnEips() v1.OvnEipInterface {
 	return &FakeOvnEips{c}
 }
@@ -62,6 +70,10 @@ func (c *FakeKubeovnV1) OvnSnatRules() v1.OvnSnatRuleInterface {
 
 func (c *FakeKubeovnV1) ProviderNetworks() v1.ProviderNetworkInterface {
 	return &FakeProviderNetworks{c}
+}
+
+func (c *FakeKubeovnV1) QoSPolicies() v1.QoSPolicyInterface {
+	return &FakeQoSPolicies{c}
 }
 
 func (c *FakeKubeovnV1) SecurityGroups() v1.SecurityGroupInterface {

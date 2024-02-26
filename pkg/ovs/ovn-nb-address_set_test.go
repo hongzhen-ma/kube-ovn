@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/kubeovn/kube-ovn/pkg/ovsdb/ovnnb"
 	"github.com/stretchr/testify/require"
+
+	"github.com/kubeovn/kube-ovn/pkg/ovsdb/ovnnb"
 )
 
 func newAddressSet(name string, externalIDs map[string]string) *ovnnb.AddressSet {
@@ -162,10 +163,9 @@ func (suite *OvnClientTestSuite) testListAddressSets() {
 	require.NoError(t, err)
 	require.Len(t, ass, 1)
 	require.Equal(t, asName, ass[0].Name)
-
 }
 
-func (suite *OvnClientTestSuite) test_addressSetFilter() {
+func (suite *OvnClientTestSuite) testAddressSetFilter() {
 	t := suite.T()
 	t.Parallel()
 

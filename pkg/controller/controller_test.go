@@ -3,50 +3,62 @@ package controller
 import (
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+
+	"k8s.io/client-go/informers"
+	coreinformers "k8s.io/client-go/informers/core/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/util/workqueue"
 
 	mockovs "github.com/kubeovn/kube-ovn/mocks/pkg/ovs"
-	"github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned/fake"
-	informerfactory "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions"
+	kubeovnfake "github.com/kubeovn/kube-ovn/pkg/client/clientset/versioned/fake"
+	kubeovninformerfactory "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions"
 	kubeovninformer "github.com/kubeovn/kube-ovn/pkg/client/informers/externalversions/kubeovn/v1"
 )
 
 type fakeControllerInformers struct {
-	vpcInformer    kubeovninformer.VpcInformer
-	sbunetInformer kubeovninformer.SubnetInformer
+	vpcInformer     kubeovninformer.VpcInformer
+	sbunetInformer  kubeovninformer.SubnetInformer
+	serviceInformer coreinformers.ServiceInformer
 }
 
 type fakeController struct {
 	fakeController *Controller
 	fakeinformers  *fakeControllerInformers
-	mockOvnClient  *mockovs.MockOvnClient
+	mockOvnClient  *mockovs.MockNbClient
 }
 
 func alwaysReady() bool { return true }
 
 func newFakeController(t *testing.T) *fakeController {
-	/* kube ovn fake client */
-	kubeovnClient := fake.NewSimpleClientset()
-	kubeovnInformerFactory := informerfactory.NewSharedInformerFactory(kubeovnClient, 0)
+	/* fake kube client */
+	kubeClient := fake.NewSimpleClientset()
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	serviceInformer := kubeInformerFactory.Core().V1().Services()
+
+	/* fake kube ovn client */
+	kubeovnClient := kubeovnfake.NewSimpleClientset()
+	kubeovnInformerFactory := kubeovninformerfactory.NewSharedInformerFactory(kubeovnClient, 0)
 	vpcInformer := kubeovnInformerFactory.Kubeovn().V1().Vpcs()
 	sbunetInformer := kubeovnInformerFactory.Kubeovn().V1().Subnets()
 
 	fakeInformers := &fakeControllerInformers{
-		vpcInformer:    vpcInformer,
-		sbunetInformer: sbunetInformer,
+		vpcInformer:     vpcInformer,
+		sbunetInformer:  sbunetInformer,
+		serviceInformer: serviceInformer,
 	}
 
 	/* ovn fake client */
-	mockOvnClient := mockovs.NewMockOvnClient(gomock.NewController(t))
+	mockOvnClient := mockovs.NewMockNbClient(gomock.NewController(t))
 
 	ctrl := &Controller{
+		servicesLister:        serviceInformer.Lister(),
 		vpcsLister:            vpcInformer.Lister(),
 		vpcSynced:             alwaysReady,
 		subnetsLister:         sbunetInformer.Lister(),
 		subnetSynced:          alwaysReady,
-		ovnClient:             mockOvnClient,
+		OVNNbClient:           mockOvnClient,
 		syncVirtualPortsQueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), ""),
 	}
 

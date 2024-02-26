@@ -1,19 +1,28 @@
 #!/bin/bash
 set -euo pipefail
 
+
+
 HW_OFFLOAD=${HW_OFFLOAD:-false}
 ENABLE_SSL=${ENABLE_SSL:-false}
 OVN_DB_IPS=${OVN_DB_IPS:-}
 TUNNEL_TYPE=${TUNNEL_TYPE:-geneve}
 FLOW_LIMIT=${FLOW_LIMIT:-10}
+DEBUG_WRAPPER=${DEBUG_WRAPPER:-}
+OVN_REMOTE_PROBE_INTERVAL=${OVN_REMOTE_PROBE_INTERVAL:-10000}
+OVN_REMOTE_OPENFLOW_INTERVAL=${OVN_REMOTE_OPENFLOW_INTERVAL:-180}
+
+echo "OVN_REMOTE_PROBE_INTERVAL is set to $OVN_REMOTE_PROBE_INTERVAL"
+echo "OVN_REMOTE_OPENFLOW_INTERVAL is set to $OVN_REMOTE_OPENFLOW_INTERVAL"
 
 # Check required kernel module
 modinfo openvswitch
 modinfo geneve
-modinfo ip_tables
 
 # CentOS 8 might not load iptables module by default, which will hurt nat function
-modprobe ip_tables
+if modinfo ip_tables; then
+  modprobe ip_tables
+fi
 
 # https://bugs.launchpad.net/neutron/+bug/1776778
 if grep -q "3.10.0-862" /proc/version
@@ -35,23 +44,30 @@ cat /proc/cmdline"
 fi
 
 function cgroup_match {
-  hash1=$(md5sum /proc/$1/cgroup | awk '{print $1}')
-  hash2=$(md5sum /proc/$2/cgroup | awk '{print $1}')
+  hash1=$(md5sum /proc/"$1"/cgroup | awk '{print $1}')
+  hash2=$(md5sum /proc/"$2"/cgroup | awk '{print $1}')
   test -n "$hash1" -a "x$hash1" = "x$hash2"
 }
 
 function quit {
-  gen_name=$(kubectl -n $POD_NAMESPACE get pod $POD_NAME -o jsonpath='{.metadata.generateName}')
-  revision_hash=$(kubectl -n $POD_NAMESPACE get pod $POD_NAME -o jsonpath='{.metadata.labels.controller-revision-hash}')
-  revision=$(kubectl -n $POD_NAMESPACE get controllerrevision $gen_name$revision_hash -o jsonpath='{.revision}')
+  gen_name=$(kubectl -n "${POD_NAMESPACE}" get pod "${POD_NAME}" -o jsonpath='{.metadata.generateName}')
+  revision_hash=$(kubectl -n "${POD_NAMESPACE}" get pod "${POD_NAME}" -o jsonpath='{.metadata.labels.controller-revision-hash}')
+  revision=$(kubectl -n "${POD_NAMESPACE}" get controllerrevision "${gen_name}${revision_hash}" -o jsonpath='{.revision}')
   ds_name=${gen_name%-}
-  latest_revision=$(kubectl -n kube-system get controllerrevision --no-headers | awk '$2 == "daemonset.apps/'$ds_name'" {print $3}' | sort -nr | head -n1)
+  latest_revision=$(kubectl -n "${POD_NAMESPACE}" get controllerrevision --no-headers | awk '$2 == "daemonset.apps/'$ds_name'" {print $3}' | sort -nr | head -n1)
   if [ "x$latest_revision" = "x$revision" ]; then
     # stop ovn-controller/ovs only when the processes are in the same cgroup
     pid=$(/usr/share/ovn/scripts/ovn-ctl status_controller | awk '{print $NF}')
-    if cgroup_match $pid self; then
+    if cgroup_match "${pid}" self; then
       /usr/share/ovn/scripts/grace_stop_ovn_controller
-      /usr/share/openvswitch/scripts/ovs-ctl stop
+    fi
+    pid=$(/usr/share/openvswitch/scripts/ovs-ctl status | grep ovsdb-server | awk '{print $NF}')
+    if cgroup_match "${pid}" self; then
+      /usr/share/openvswitch/scripts/ovs-ctl --no-ovs-vswitchd stop
+    fi
+    pid=$(/usr/share/openvswitch/scripts/ovs-ctl status | grep ovs-vswitchd | awk '{print $NF}')
+    if cgroup_match "${pid}" self; then
+      /usr/share/openvswitch/scripts/ovs-ctl --no-ovsdb-server stop
     fi
   fi
 
@@ -59,13 +75,16 @@ function quit {
 }
 trap quit EXIT
 
+# update links to point to the iptables binaries
+iptables -V
+
 # Start ovsdb
-/usr/share/openvswitch/scripts/ovs-ctl restart --no-ovs-vswitchd --system-id=random
+/usr/share/openvswitch/scripts/ovs-ctl restart --no-ovs-vswitchd --system-id=random --ovsdb-server-wrapper="${DEBUG_WRAPPER}"
 # Restrict the number of pthreads ovs-vswitchd creates to reduce the
 # amount of RSS it uses on hosts with many cores
 # https://bugzilla.redhat.com/show_bug.cgi?id=1571379
 # https://bugzilla.redhat.com/show_bug.cgi?id=1572797
-if [[ `nproc` -gt 12 ]]; then
+if [[ $(nproc) -gt 12 ]]; then
     ovs-vsctl --no-wait set Open_vSwitch . other_config:n-revalidator-threads=4
     ovs-vsctl --no-wait set Open_vSwitch . other_config:n-handler-threads=10
 fi
@@ -83,20 +102,20 @@ ovs-appctl -t "$ovsdb_server_ctl" vlog/set reconnect:file:err
 
 function handle_underlay_bridges() {
   bridges=($(ovs-vsctl --no-heading --columns=name find bridge external-ids:vendor=kube-ovn))
-  for br in ${bridges[@]}; do
-    if ! ip link show $br >/dev/null; then
+  for br in "${bridges[@]}"; do
+    if ! ip link show "$br" >/dev/null; then
       # the bridge does not exist, leave it to be handled by kube-ovn-cni
       echo "deleting ovs bridge $br"
-      ovs-vsctl --no-wait del-br $br
+      ovs-vsctl --no-wait del-br "$br"
     fi
   done
 
   bridges=($(ovs-vsctl --no-heading --columns=name find bridge external-ids:vendor=kube-ovn external-ids:exchange-link-name=true))
-  for br in ${bridges[@]}; do
+  for br in "${bridges[@]}"; do
     if [ -z $(ip link show $br type openvswitch 2>/dev/null || true) ]; then
       # the bridge does not exist, leave it to be handled by kube-ovn-cni
       echo "deleting ovs bridge $br"
-      ovs-vsctl --no-wait del-br $br
+      ovs-vsctl --no-wait del-br "$br"
     fi
   done
 }
@@ -104,7 +123,7 @@ function handle_underlay_bridges() {
 handle_underlay_bridges
 
 # Start vswitchd. restart will automatically set/unset flow-restore-wait which is not what we want
-/usr/share/openvswitch/scripts/ovs-ctl restart --no-ovsdb-server --system-id=random --no-mlockall
+/usr/share/openvswitch/scripts/ovs-ctl restart --no-ovsdb-server --system-id=random --no-mlockall --ovs-vswitchd-wrapper="$DEBUG_WRAPPER"
 /usr/share/openvswitch/scripts/ovs-ctl --protocol=udp --dport=6081 enable-protocol
 
 function gen_conn_str {
@@ -126,16 +145,16 @@ function gen_conn_str {
 }
 # Set remote ovn-sb for ovn-controller to connect to
 ovs-vsctl set open . external-ids:ovn-remote="$(gen_conn_str 6642)"
-ovs-vsctl set open . external-ids:ovn-remote-probe-interval=10000
-ovs-vsctl set open . external-ids:ovn-openflow-probe-interval=180
+ovs-vsctl set open . external-ids:ovn-remote-probe-interval="${OVN_REMOTE_PROBE_INTERVAL}"
+ovs-vsctl set open . external-ids:ovn-openflow-probe-interval="${OVN_REMOTE_OPENFLOW_INTERVAL}"
 ovs-vsctl set open . external-ids:ovn-encap-type="${TUNNEL_TYPE}"
 ovs-vsctl set open . external-ids:hostname="${KUBE_NODE_NAME}"
 
 # Start ovn-controller
 if [[ "$ENABLE_SSL" == "false" ]]; then
-  /usr/share/ovn/scripts/ovn-ctl restart_controller
+  /usr/share/ovn/scripts/ovn-ctl --ovn-controller-wrapper="$DEBUG_WRAPPER" restart_controller
 else
-  /usr/share/ovn/scripts/ovn-ctl --ovn-controller-ssl-key=/var/run/tls/key --ovn-controller-ssl-cert=/var/run/tls/cert --ovn-controller-ssl-ca-cert=/var/run/tls/cacert restart_controller
+  /usr/share/ovn/scripts/ovn-ctl --ovn-controller-ssl-key=/var/run/tls/key --ovn-controller-ssl-cert=/var/run/tls/cert --ovn-controller-ssl-ca-cert=/var/run/tls/cacert --ovn-controller-wrapper="$DEBUG_WRAPPER" restart_controller
 fi
 
 chmod 600 /etc/openvswitch/*

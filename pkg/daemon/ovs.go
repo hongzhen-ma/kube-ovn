@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	goping "github.com/oilbeater/go-ping"
+	goping "github.com/prometheus-community/pro-bing"
 	"k8s.io/klog/v2"
 
 	"github.com/kubeovn/kube-ovn/pkg/ovs"
@@ -14,10 +14,10 @@ import (
 
 const gatewayCheckMaxRetry = 200
 
-func pingGateway(gw, src string, verbose bool, maxRetry int) error {
+func pingGateway(gw, src string, verbose bool, maxRetry int) (count int, err error) {
 	pinger, err := goping.NewPinger(gw)
 	if err != nil {
-		return fmt.Errorf("failed to init pinger: %v", err)
+		return 0, fmt.Errorf("failed to init pinger: %v", err)
 	}
 	pinger.SetPrivileged(true)
 	// CNITimeoutSec = 220, cannot exceed
@@ -25,79 +25,105 @@ func pingGateway(gw, src string, verbose bool, maxRetry int) error {
 	pinger.Timeout = time.Duration(maxRetry) * time.Second
 	pinger.Interval = time.Second
 
-	pinger.OnRecv = func(p *goping.Packet) {
+	pinger.OnRecv = func(_ *goping.Packet) {
 		pinger.Stop()
 	}
 
-	// long time keep ping may result in readiness probe failed when start
-	// show ping fails when gw not work
-	go func() {
-		for {
-			time.Sleep(3 * time.Second)
-			stats := pinger.Statistics()
-			if stats.PacketsSent >= pinger.Count {
-				break
-			}
-			if stats.PacketsRecv == 0 {
-				klog.Errorf("%s network not ready after %d ping %s, %v%% packet loss", src, stats.PacketsSent, gw, stats.PacketLoss)
-			} else {
-				break
-			}
+	pinger.OnSend = func(_ *goping.Packet) {
+		if pinger.PacketsRecv == 0 && pinger.PacketsSent != 0 && pinger.PacketsSent%3 == 0 {
+			klog.Warningf("%s network not ready after %d ping to gateway %s", src, pinger.PacketsSent, gw)
 		}
-	}()
+	}
 
-	pinger.Run()
+	if err = pinger.Run(); err != nil {
+		klog.Errorf("failed to run pinger for destination %s: %v", gw, err)
+		return 0, err
+	}
+
+	if pinger.PacketsRecv == 0 {
+		klog.Warningf("%s network not ready after %d ping, gw %s", src, pinger.PacketsSent, gw)
+		return pinger.PacketsSent, fmt.Errorf("no packets received from gateway %s", gw)
+	}
+
 	cniConnectivityResult.WithLabelValues(nodeName).Add(float64(pinger.PacketsSent))
 	if verbose {
 		klog.Infof("%s network ready after %d ping, gw %s", src, pinger.PacketsSent, gw)
 	}
 
-	return nil
+	return pinger.PacketsSent, nil
 }
 
 func configureGlobalMirror(portName string, mtu int) error {
-	raw, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", portName, "--",
-		"set", "interface", portName, "type=internal", "--",
-		"clear", "bridge", "br-int", "mirrors", "--",
-		"--id=@mirror0", "get", "port", portName, "--",
-		"--id=@m", "create", "mirror", fmt.Sprintf("name=%s", util.MirrorDefaultName), "select_all=true", "output_port=@mirror0", "--",
-		"add", "bridge", "br-int", "mirrors", "@m")
+	nicExist, err := linkExists(portName)
 	if err != nil {
-		klog.Errorf("failed to configure mirror nic %s %q", portName, raw)
-		return fmt.Errorf(raw)
+		klog.Error(err)
+		return err
 	}
+
+	if !nicExist {
+		raw, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", portName, "--",
+			"set", "interface", portName, "type=internal", "--",
+			"clear", "bridge", "br-int", "mirrors", "--",
+			"--id=@mirror0", "get", "port", portName, "--",
+			"--id=@m", "create", "mirror", fmt.Sprintf("name=%s", util.MirrorDefaultName), "select_all=true", "output_port=@mirror0", "--",
+			"add", "bridge", "br-int", "mirrors", "@m")
+		if err != nil {
+			klog.Errorf("failed to configure mirror nic %s %q", portName, raw)
+			return fmt.Errorf(raw)
+		}
+	} else {
+		raw, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", portName, "--",
+			"clear", "bridge", "br-int", "mirrors", "--",
+			"--id=@mirror0", "get", "port", portName, "--",
+			"--id=@m", "create", "mirror", fmt.Sprintf("name=%s", util.MirrorDefaultName), "select_all=true", "output_port=@mirror0", "--",
+			"add", "bridge", "br-int", "mirrors", "@m")
+		if err != nil {
+			klog.Errorf("failed to configure mirror nic %s %q", portName, raw)
+			return fmt.Errorf(raw)
+		}
+	}
+
 	return configureMirrorLink(portName, mtu)
 }
 
 func configureEmptyMirror(portName string, mtu int) error {
-	raw, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", portName, "--",
-		"set", "interface", portName, "type=internal", "--",
-		"clear", "bridge", "br-int", "mirrors", "--",
-		"--id=@mirror0", "get", "port", portName, "--",
-		"--id=@m", "create", "mirror", fmt.Sprintf("name=%s", util.MirrorDefaultName), "output_port=@mirror0", "--",
-		"add", "bridge", "br-int", "mirrors", "@m")
+	nicExist, err := linkExists(portName)
 	if err != nil {
-		klog.Errorf("failed to configure mirror nic %s %q", portName, raw)
-		return fmt.Errorf(raw)
+		klog.Error(err)
+		return err
+	}
+
+	if !nicExist {
+		raw, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", portName, "--",
+			"set", "interface", portName, "type=internal", "--",
+			"clear", "bridge", "br-int", "mirrors", "--",
+			"--id=@mirror0", "get", "port", portName, "--",
+			"--id=@m", "create", "mirror", fmt.Sprintf("name=%s", util.MirrorDefaultName), "output_port=@mirror0", "--",
+			"add", "bridge", "br-int", "mirrors", "@m")
+		if err != nil {
+			klog.Errorf("failed to configure mirror nic %s %q", portName, raw)
+			return fmt.Errorf(raw)
+		}
+	} else {
+		raw, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", portName, "--",
+			"clear", "bridge", "br-int", "mirrors", "--",
+			"--id=@mirror0", "get", "port", portName, "--",
+			"--id=@m", "create", "mirror", fmt.Sprintf("name=%s", util.MirrorDefaultName), "output_port=@mirror0", "--",
+			"add", "bridge", "br-int", "mirrors", "@m")
+		if err != nil {
+			klog.Errorf("failed to configure mirror nic %s %q", portName, raw)
+			return fmt.Errorf(raw)
+		}
 	}
 	return configureMirrorLink(portName, mtu)
 }
 
-func updateOvnMapping(name, key, value string) error {
-	output, err := ovs.Exec(ovs.IfExists, "get", "open", ".", "external-ids:"+name)
-	if err != nil {
-		return fmt.Errorf("failed to get %s, %v: %q", name, err, output)
+func decodeOvnMappings(s string) map[string]string {
+	if len(s) == 0 {
+		return map[string]string{}
 	}
 
-	if len(output) == 0 {
-		s := fmt.Sprintf("external-ids:%s=%s:%s", name, key, value)
-		if output, err = ovs.Exec("set", "open", ".", s); err != nil {
-			return fmt.Errorf("failed to set %s, %v: %q", name, err, output)
-		}
-		return nil
-	}
-
-	fields := strings.Split(output, ",")
+	fields := strings.Split(s, ",")
 	mappings := make(map[string]string, len(fields)+1)
 	for _, f := range fields {
 		idx := strings.IndexRune(f, ':')
@@ -107,17 +133,37 @@ func updateOvnMapping(name, key, value string) error {
 		}
 		mappings[f[:idx]] = f[idx+1:]
 	}
-	mappings[key] = value
+	return mappings
+}
 
-	fields = make([]string, 0, len(mappings))
-	for k, v := range mappings {
-		fields = append(fields, fmt.Sprintf("%s:%s", k, v))
+func encodeOvnMappings(mappings map[string]string) string {
+	if len(mappings) == 0 {
+		return ""
 	}
 
-	if len(fields) == 0 {
+	fields := make([]string, 0, len(mappings))
+	for k, v := range mappings {
+		fields = append(fields, fmt.Sprintf("%s:%v", k, v))
+	}
+	return strings.Join(fields, ",")
+}
+
+func getOvnMappings(name string) (map[string]string, error) {
+	output, err := ovs.Exec(ovs.IfExists, "get", "open", ".", "external-ids:"+name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get %s, %v: %q", name, err, output)
+	}
+
+	return decodeOvnMappings(output), nil
+}
+
+func setOvnMappings(name string, mappings map[string]string) error {
+	var err error
+	var output string
+	if s := encodeOvnMappings(mappings); len(s) == 0 {
 		output, err = ovs.Exec(ovs.IfExists, "remove", "open", ".", "external-ids", name)
 	} else {
-		output, err = ovs.Exec("set", "open", ".", fmt.Sprintf("external-ids:%s=%s", name, strings.Join(fields, ",")))
+		output, err = ovs.Exec("set", "open", ".", fmt.Sprintf("external-ids:%s=%s", name, s))
 	}
 	if err != nil {
 		return fmt.Errorf("failed to set %s, %v: %q", name, err, output)
@@ -126,7 +172,37 @@ func updateOvnMapping(name, key, value string) error {
 	return nil
 }
 
-func configExternalBridge(provider, bridge, nic string, exchangeLinkName, macLearningFallback bool) error {
+func addOvnMapping(name, key, value string, overwrite bool) error {
+	mappings, err := getOvnMappings(name)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+
+	if mappings[key] == value || (mappings[key] != "" && !overwrite) {
+		return nil
+	}
+
+	mappings[key] = value
+	return setOvnMappings(name, mappings)
+}
+
+func removeOvnMapping(name, key string) error {
+	mappings, err := getOvnMappings(name)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+
+	length := len(mappings)
+	delete(mappings, key)
+	if len(mappings) == length {
+		return nil
+	}
+	return setOvnMappings(name, mappings)
+}
+
+func (c *Controller) configExternalBridge(provider, bridge, nic string, exchangeLinkName, macLearningFallback bool) error {
 	brExists, err := ovs.BridgeExists(bridge)
 	if err != nil {
 		return fmt.Errorf("failed to check OVS bridge existence: %v", err)
@@ -156,7 +232,7 @@ func configExternalBridge(provider, bridge, nic string, exchangeLinkName, macLea
 					return fmt.Errorf("failed to check vendor of port %s: %v", port, err)
 				}
 				if ok {
-					if err = removeProviderNic(port, bridge); err != nil {
+					if err = c.removeProviderNic(port, bridge); err != nil {
 						return fmt.Errorf("failed to remove port %s from OVS bridge %s: %v", port, bridge, err)
 					}
 				}
@@ -164,7 +240,7 @@ func configExternalBridge(provider, bridge, nic string, exchangeLinkName, macLea
 		}
 	}
 
-	if err = updateOvnMapping("ovn-bridge-mappings", provider, bridge); err != nil {
+	if err = addOvnMapping("ovn-bridge-mappings", provider, bridge, true); err != nil {
 		klog.Error(err)
 		return err
 	}
@@ -173,23 +249,9 @@ func configExternalBridge(provider, bridge, nic string, exchangeLinkName, macLea
 }
 
 func initProviderChassisMac(provider string) error {
-	output, err := ovs.Exec(ovs.IfExists, "get", "open", ".", "external-ids:ovn-chassis-mac-mappings")
-	if err != nil {
-		return fmt.Errorf("failed to get ovn-bridge-mappings, %v", err)
-	}
-
-	for _, macMap := range strings.Split(output, ",") {
-		if len(macMap) == len(provider)+18 && strings.Contains(output, provider) {
-			return nil
-		}
-	}
-
-	macMappings := fmt.Sprintf("%s:%s", provider, util.GenerateMac())
-	if output != "" {
-		macMappings = fmt.Sprintf("%s,%s", output, macMappings)
-	}
-	if output, err = ovs.Exec("set", "open", ".", "external-ids:ovn-chassis-mac-mappings="+macMappings); err != nil {
-		return fmt.Errorf("failed to set ovn-chassis-mac-mappings, %v: %q", err, output)
+	if err := addOvnMapping("ovn-chassis-mac-mappings", provider, util.GenerateMac(), false); err != nil {
+		klog.Error(err)
+		return err
 	}
 	return nil
 }

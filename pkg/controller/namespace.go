@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
@@ -19,7 +20,6 @@ import (
 )
 
 func (c *Controller) enqueueAddNamespace(obj interface{}) {
-
 	if c.config.EnableNP {
 		for _, np := range c.namespaceMatchNetworkPolicies(obj.(*v1.Namespace)) {
 			c.updateNpQueue.Add(np)
@@ -35,7 +35,6 @@ func (c *Controller) enqueueAddNamespace(obj interface{}) {
 }
 
 func (c *Controller) enqueueDeleteNamespace(obj interface{}) {
-
 	if c.config.EnableNP {
 		for _, np := range c.namespaceMatchNetworkPolicies(obj.(*v1.Namespace)) {
 			c.updateNpQueue.Add(np)
@@ -43,9 +42,9 @@ func (c *Controller) enqueueDeleteNamespace(obj interface{}) {
 	}
 }
 
-func (c *Controller) enqueueUpdateNamespace(old, new interface{}) {
-	oldNs := old.(*v1.Namespace)
-	newNs := new.(*v1.Namespace)
+func (c *Controller) enqueueUpdateNamespace(oldObj, newObj interface{}) {
+	oldNs := oldObj.(*v1.Namespace)
+	newNs := newObj.(*v1.Namespace)
 	if oldNs.ResourceVersion == newNs.ResourceVersion {
 		return
 	}
@@ -97,7 +96,6 @@ func (c *Controller) processNextAddNamespaceWorkItem() bool {
 		c.addNamespaceQueue.Forget(obj)
 		return nil
 	}(obj)
-
 	if err != nil {
 		utilruntime.HandleError(err)
 		return true
@@ -107,22 +105,33 @@ func (c *Controller) processNextAddNamespaceWorkItem() bool {
 }
 
 func (c *Controller) handleAddNamespace(key string) error {
+	c.nsKeyMutex.LockKey(key)
+	defer func() { _ = c.nsKeyMutex.UnlockKey(key) }()
+	klog.Infof("handle add/update namespace %s", key)
+
 	cachedNs, err := c.namespacesLister.Get(key)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
 		}
+		klog.Error(err)
 		return err
 	}
 	namespace := cachedNs.DeepCopy()
 
-	var ls string
+	var ls, ippool string
 	var lss, cidrs, excludeIps []string
 	subnets, err := c.subnetsLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list subnets %v", err)
 		return err
 	}
+	ippools, err := c.ippoolLister.List(labels.Everything())
+	if err != nil {
+		klog.Errorf("failed to list ippools: %v", err)
+		return err
+	}
+
 	// check if subnet bind ns
 	for _, s := range subnets {
 		for _, ns := range s.Spec.Namespaces {
@@ -132,6 +141,13 @@ func (c *Controller) handleAddNamespace(key string) error {
 				excludeIps = append(excludeIps, strings.Join(s.Spec.ExcludeIps, ","))
 				break
 			}
+		}
+	}
+
+	for _, p := range ippools {
+		if slices.Contains(p.Spec.Namespaces, key) {
+			ippool = p.Name
+			break
 		}
 	}
 
@@ -148,7 +164,7 @@ func (c *Controller) handleAddNamespace(key string) error {
 			return err
 		}
 		for _, v := range vpcs {
-			if util.ContainsString(v.Spec.Namespaces, key) {
+			if slices.Contains(v.Spec.Namespaces, key) {
 				vpc = v
 				break
 			}
@@ -171,19 +187,26 @@ func (c *Controller) handleAddNamespace(key string) error {
 
 	if namespace.Annotations == nil || len(namespace.Annotations) == 0 {
 		namespace.Annotations = map[string]string{}
-	} else {
-		if namespace.Annotations[util.LogicalSwitchAnnotation] == strings.Join(lss, ",") &&
-			namespace.Annotations[util.CidrAnnotation] == strings.Join(cidrs, ";") &&
-			namespace.Annotations[util.ExcludeIpsAnnotation] == strings.Join(excludeIps, ";") {
-			return nil
-		}
+	} else if namespace.Annotations[util.LogicalSwitchAnnotation] == strings.Join(lss, ",") &&
+		namespace.Annotations[util.CidrAnnotation] == strings.Join(cidrs, ";") &&
+		namespace.Annotations[util.ExcludeIpsAnnotation] == strings.Join(excludeIps, ";") &&
+		namespace.Annotations[util.IPPoolAnnotation] == ippool {
+		return nil
 	}
+
 	namespace.Annotations[util.LogicalSwitchAnnotation] = strings.Join(lss, ",")
 	namespace.Annotations[util.CidrAnnotation] = strings.Join(cidrs, ";")
 	namespace.Annotations[util.ExcludeIpsAnnotation] = strings.Join(excludeIps, ";")
 
+	if ippool == "" {
+		delete(namespace.Annotations, util.IPPoolAnnotation)
+	} else {
+		namespace.Annotations[util.IPPoolAnnotation] = ippool
+	}
+
 	patch, err := util.GenerateStrategicMergePatchPayload(cachedNs, namespace)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 	if _, err = c.config.KubeClient.CoreV1().Namespaces().Patch(context.Background(), key,

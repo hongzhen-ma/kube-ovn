@@ -5,7 +5,7 @@ package util
 
 import (
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"sync"
@@ -15,7 +15,7 @@ import (
 	"k8s.io/klog/v2"
 )
 
-func ArpResolve(nic, srcIP, dstIP string, timeout time.Duration, maxRetry int) (net.HardwareAddr, int, error) {
+func ArpResolve(nic, _, dstIP string, timeout time.Duration, maxRetry int) (net.HardwareAddr, int, error) {
 	target, err := netip.ParseAddr(dstIP)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to parse target address %s: %v", dstIP, err)
@@ -76,8 +76,8 @@ func ArpDetectIPConflict(nic, ip string, mac net.HardwareAddr) (net.HardwareAddr
 	const (
 		probeWait        = 1 * time.Second // initial random delay
 		probeNum         = 3               // number of probe packets
-		probeMin         = 1 * time.Second // minimum delay until repeated probe
-		probeMax         = 2 * time.Second // maximum delay until repeated probe
+		probeMinmum      = 1 * time.Second // minimum delay until repeated probe
+		probeMaxmum      = 2 * time.Second // maximum delay until repeated probe
 		announceWait     = 2 * time.Second // delay before announcing
 		announceNum      = 2               // number of Announcement packets
 		announceInterval = 2 * time.Second // time between Announcement packets
@@ -93,16 +93,19 @@ func ArpDetectIPConflict(nic, ip string, mac net.HardwareAddr) (net.HardwareAddr
 	tha := net.HardwareAddr{0, 0, 0, 0, 0, 0}
 	pkt, err := arp.NewPacket(arp.OperationRequest, mac, spa, tha, tpa)
 	if err != nil {
+		klog.Error(err)
 		return nil, err
 	}
 
 	ifi, err := net.InterfaceByName(nic)
 	if err != nil {
+		klog.Error(err)
 		return nil, err
 	}
 
 	client, err := arp.Dial(ifi)
 	if err != nil {
+		klog.Error(err)
 		return nil, err
 	}
 	defer client.Close()
@@ -111,12 +114,12 @@ func ArpDetectIPConflict(nic, ip string, mac net.HardwareAddr) (net.HardwareAddr
 	durations := make([]time.Duration, probeNum)
 	// wait for a random time interval selected uniformly in the range zero to
 	// PROBE_WAIT seconds
-	durations[0] = time.Duration(rand.Int63n(int64(probeWait)))
+	durations[0] = time.Duration(rand.Int64N(int64(probeWait)))
 	deadline = deadline.Add(durations[0])
 	for i := 1; i < probeNum; i++ {
 		// send PROBE_NUM probe packets, each of these probe packets spaced
 		// randomly and uniformly, PROBE_MIN to PROBE_MAX seconds apart
-		durations[i] = probeMin + time.Duration(rand.Int63n(int64(probeMax-probeMin)))
+		durations[i] = probeMinmum + time.Duration(rand.Int64N(int64(probeMaxmum-probeMinmum)))
 		deadline = deadline.Add(durations[i])
 	}
 
@@ -199,17 +202,48 @@ func ArpDetectIPConflict(nic, ip string, mac net.HardwareAddr) (net.HardwareAddr
 	// Announcement is identical to the ARP Probe described above,
 	// except that now the sender and target IP addresses are both
 	// set to the host's newly selected IPv4 address.
-	if pkt, err = arp.NewPacket(arp.OperationRequest, mac, tpa, tha, tpa); err != nil {
+	if err = AnnounceArpAddress(nic, ip, mac, announceNum, announceInterval); err != nil {
 		return nil, err
 	}
 
+	return nil, nil
+}
+
+func AnnounceArpAddress(nic, ip string, mac net.HardwareAddr, announceNum int, announceInterval time.Duration) error {
+	klog.Infof("announce arp address nic %s, ip %s, with mac %v", nic, ip, mac)
+	netInterface, err := net.InterfaceByName(nic)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+
+	client, err := arp.Dial(netInterface)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+	defer client.Close()
+
+	tpa, err := netip.ParseAddr(ip)
+	if err != nil {
+		klog.Errorf("failed to parse IP address %s: %v", ip, err)
+		return err
+	}
+	tha := net.HardwareAddr{0, 0, 0, 0, 0, 0}
+	pkt, err := arp.NewPacket(arp.OperationRequest, mac, tpa, tha, tpa)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+
+	dstMac := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	for i := 0; i < announceNum; i++ {
 		c := time.NewTimer(announceInterval)
 		if err = client.SetDeadline(time.Now().Add(announceInterval)); err != nil {
-			return nil, err
+			return err
 		}
 		if err = client.WriteTo(pkt, dstMac); err != nil {
-			return nil, err
+			return err
 		}
 		if i == announceNum-1 {
 			// the last one, no need to wait
@@ -219,5 +253,5 @@ func ArpDetectIPConflict(nic, ip string, mac net.HardwareAddr) (net.HardwareAddr
 		}
 	}
 
-	return nil, nil
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/scylladb/go-set/strset"
 	v1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
@@ -23,7 +24,7 @@ func (c *Controller) initRuntime() error {
 	return nil
 }
 
-func (c *Controller) reconcileRouters(_ subnetEvent) error {
+func (c *Controller) reconcileRouters(_ *subnetEvent) error {
 	klog.Info("reconcile routes")
 	node, err := c.nodesLister.Get(c.config.NodeName)
 	if err != nil {
@@ -53,7 +54,7 @@ func (c *Controller) reconcileRouters(_ subnetEvent) error {
 	v4Cidrs, v6Cidrs := make([]string, 0, len(subnets)), make([]string, 0, len(subnets))
 	for _, subnet := range subnets {
 		if (subnet.Spec.Vlan != "" && !subnet.Spec.LogicalGateway) ||
-			subnet.Spec.Vpc != util.DefaultVpc ||
+			subnet.Spec.Vpc != c.config.ClusterRouter ||
 			!subnet.Status.IsReady() {
 			continue
 		}
@@ -123,35 +124,13 @@ func (c *Controller) reconcileRouters(_ subnetEvent) error {
 }
 
 func routeDiff(existingRoutes, v4Cidrs, v6Cidrs []string) (toAddV4, toAddV6, toDel []string) {
-	existing := make(map[string]struct{}, len(existingRoutes))
-	expectedV4 := make(map[string]struct{}, len(v4Cidrs))
-	expectedV6 := make(map[string]struct{}, len(v6Cidrs))
-	for _, r := range existingRoutes {
-		existing[r] = struct{}{}
-	}
+	existing := strset.New(existingRoutes...)
+	expectedV4 := strset.New(v4Cidrs...)
+	expectedV6 := strset.New(v6Cidrs...)
 
-	var ok bool
-	for _, r := range v4Cidrs {
-		expectedV4[r] = struct{}{}
-		if _, ok = existing[r]; !ok {
-			toAddV4 = append(toAddV4, r)
-		}
-	}
-	for _, r := range v6Cidrs {
-		expectedV6[r] = struct{}{}
-		if _, ok = existing[r]; !ok {
-			toAddV6 = append(toAddV6, r)
-		}
-	}
-	for _, r := range existingRoutes {
-		if _, ok = expectedV4[r]; ok {
-			continue
-		}
-		if _, ok = expectedV6[r]; ok {
-			continue
-		}
-		toDel = append(toDel, r)
-	}
+	toAddV4 = strset.Difference(expectedV4, existing).List()
+	toAddV6 = strset.Difference(expectedV6, existing).List()
+	toDel = strset.Difference(existing, expectedV4, expectedV6).List()
 
 	return
 }
@@ -169,6 +148,7 @@ func (c *Controller) handlePod(key string) error {
 		if k8serrors.IsNotFound(err) {
 			return nil
 		}
+		klog.Error(err)
 		return err
 	}
 
@@ -179,43 +159,49 @@ func (c *Controller) handlePod(key string) error {
 	}
 
 	podName := pod.Name
-	if pod.Annotations[fmt.Sprintf(util.VmTemplate, util.OvnProvider)] != "" {
-		podName = pod.Annotations[fmt.Sprintf(util.VmTemplate, util.OvnProvider)]
+	if pod.Annotations[fmt.Sprintf(util.VMTemplate, util.OvnProvider)] != "" {
+		podName = pod.Annotations[fmt.Sprintf(util.VMTemplate, util.OvnProvider)]
 	}
 
 	// set default nic bandwidth
 	ifaceID := ovs.PodNameToPortName(podName, pod.Namespace, util.OvnProvider)
 	err = ovs.SetInterfaceBandwidth(podName, pod.Namespace, ifaceID, pod.Annotations[util.EgressRateAnnotation], pod.Annotations[util.IngressRateAnnotation])
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 	err = ovs.ConfigInterfaceMirror(c.config.EnableMirror, pod.Annotations[util.MirrorControlAnnotation], ifaceID)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 
 	// set multus-nic bandwidth
 	attachNets, err := util.ParsePodNetworkAnnotation(pod.Annotations[util.AttachmentNetworkAnnotation], pod.Namespace)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 	for _, multiNet := range attachNets {
 		provider := fmt.Sprintf("%s.%s.ovn", multiNet.Name, multiNet.Namespace)
-		if pod.Annotations[fmt.Sprintf(util.VmTemplate, provider)] != "" {
-			podName = pod.Annotations[fmt.Sprintf(util.VmTemplate, provider)]
+		if pod.Annotations[fmt.Sprintf(util.VMTemplate, provider)] != "" {
+			podName = pod.Annotations[fmt.Sprintf(util.VMTemplate, provider)]
 		}
 		if pod.Annotations[fmt.Sprintf(util.AllocatedAnnotationTemplate, provider)] == "true" {
 			ifaceID = ovs.PodNameToPortName(podName, pod.Namespace, provider)
 			err = ovs.SetInterfaceBandwidth(podName, pod.Namespace, ifaceID, pod.Annotations[fmt.Sprintf(util.EgressRateAnnotationTemplate, provider)], pod.Annotations[fmt.Sprintf(util.IngressRateAnnotationTemplate, provider)])
 			if err != nil {
+				klog.Error(err)
 				return err
 			}
 			err = ovs.ConfigInterfaceMirror(c.config.EnableMirror, pod.Annotations[fmt.Sprintf(util.MirrorControlAnnotationTemplate, provider)], ifaceID)
 			if err != nil {
+				klog.Error(err)
 				return err
 			}
 			err = ovs.SetNetemQos(podName, pod.Namespace, ifaceID, pod.Annotations[fmt.Sprintf(util.NetemQosLatencyAnnotationTemplate, provider)], pod.Annotations[fmt.Sprintf(util.NetemQosLimitAnnotationTemplate, provider)], pod.Annotations[fmt.Sprintf(util.NetemQosLossAnnotationTemplate, provider)], pod.Annotations[fmt.Sprintf(util.NetemQosJitterAnnotationTemplate, provider)])
 			if err != nil {
+				klog.Error(err)
 				return err
 			}
 		}
@@ -223,7 +209,7 @@ func (c *Controller) handlePod(key string) error {
 	return nil
 }
 
-func (c *Controller) loopEncapIpCheck() {
+func (c *Controller) loopEncapIPCheck() {
 	// TODO
 }
 

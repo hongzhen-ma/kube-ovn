@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	api "github.com/osrg/gobgp/v3/api"
@@ -38,9 +39,9 @@ type Configuration struct {
 	GrpcHost                    string
 	GrpcPort                    uint32
 	ClusterAs                   uint32
-	RouterId                    string
-	NeighborAddress             string
-	NeighborIPv6Address         string
+	RouterID                    string
+	NeighborAddresses           []string
+	NeighborIPv6Addresses       []string
 	NeighborAs                  uint32
 	AuthPassword                string
 	HoldTime                    float64
@@ -50,8 +51,9 @@ type Configuration struct {
 	GracefulRestartDeferralTime time.Duration
 	GracefulRestartTime         time.Duration
 	PassiveMode                 bool
-	EbgpMultihopTtl             uint8
+	EbgpMultihopTTL             uint8
 
+	NodeName       string
 	KubeConfigFile string
 	KubeClient     kubernetes.Interface
 	KubeOvnClient  clientset.Interface
@@ -68,16 +70,17 @@ func ParseFlags() (*Configuration, error) {
 		argGrpcHost                    = pflag.String("grpc-host", "127.0.0.1", "The host address for grpc to listen, default: 127.0.0.1")
 		argGrpcPort                    = pflag.Uint32("grpc-port", DefaultBGPGrpcPort, "The port for grpc to listen, default:50051")
 		argClusterAs                   = pflag.Uint32("cluster-as", DefaultBGPClusterAs, "The as number of container network, default 65000")
-		argRouterId                    = pflag.String("router-id", "", "The address for the speaker to use as router id, default the node ip")
-		argNeighborAddress             = pflag.String("neighbor-address", "", "The router address the speaker connects to.")
-		argNeighborIPv6Address         = pflag.String("neighbor-ipv6-address", "", "The router address the speaker connects to.")
+		argRouterID                    = pflag.String("router-id", "", "The address for the speaker to use as router id, default the node ip")
+		argNeighborAddress             = pflag.String("neighbor-address", "", "Comma separated IPv4 router addresses the speaker connects to.")
+		argNeighborIPv6Address         = pflag.String("neighbor-ipv6-address", "", "Comma separated IPv6 router addresses the speaker connects to.")
 		argNeighborAs                  = pflag.Uint32("neighbor-as", DefaultBGPNeighborAs, "The router as number, default 65001")
 		argAuthPassword                = pflag.String("auth-password", "", "bgp peer auth password")
 		argHoldTime                    = pflag.Duration("holdtime", DefaultBGPHoldtime, "ovn-speaker goes down abnormally, the local saving time of BGP route will be affected.Holdtime must be in the range 3s to 65536s. (default 90s)")
 		argPprofPort                   = pflag.Uint32("pprof-port", DefaultPprofPort, "The port to get profiling data, default: 10667")
+		argNodeName                    = pflag.String("node-name", os.Getenv(util.HostnameEnv), "Name of the node on which the speaker is running on.")
 		argKubeConfigFile              = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
-		argPassiveMode                 = pflag.BoolP("passivemode", "", false, "Set BGP Speaker to passive model,do not actively initiate connections to peers ")
-		argEbgpMultihopTtl             = pflag.Uint8("ebgp-multihop", DefaultEbgpMultiHop, "The TTL value of EBGP peer, default: 1")
+		argPassiveMode                 = pflag.BoolP("passivemode", "", false, "Set BGP Speaker to passive model,do not actively initiate connections to peers")
+		argEbgpMultihopTTL             = pflag.Uint8("ebgp-multihop", DefaultEbgpMultiHop, "The TTL value of EBGP peer, default: 1")
 	)
 	klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
 	klog.InitFlags(klogFlags)
@@ -101,14 +104,11 @@ func ParseFlags() (*Configuration, error) {
 	if ht > 65536 || ht < 3 {
 		return nil, errors.New("the bgp holdtime must be in the range 3s to 65536s")
 	}
-	if *argRouterId != "" && net.ParseIP(*argRouterId) == nil {
-		return nil, fmt.Errorf("invalid router-id format: %s", *argRouterId)
+	if *argRouterID != "" && net.ParseIP(*argRouterID) == nil {
+		return nil, fmt.Errorf("invalid router-id format: %s", *argRouterID)
 	}
-	if *argNeighborAddress != "" && net.ParseIP(*argNeighborAddress).To4() == nil {
-		return nil, fmt.Errorf("invalid neighbor-address format: %s", *argNeighborAddress)
-	}
-	if *argNeighborIPv6Address != "" && net.ParseIP(*argNeighborIPv6Address).To16() == nil {
-		return nil, fmt.Errorf("invalid neighbor-ipv6-address format: %s", *argNeighborIPv6Address)
+	if *argEbgpMultihopTTL < 1 || *argEbgpMultihopTTL > 255 {
+		return nil, errors.New("the bgp MultihopTtl must be in the range 1 to 255")
 	}
 
 	config := &Configuration{
@@ -116,24 +116,40 @@ func ParseFlags() (*Configuration, error) {
 		GrpcHost:                    *argGrpcHost,
 		GrpcPort:                    *argGrpcPort,
 		ClusterAs:                   *argClusterAs,
-		RouterId:                    *argRouterId,
-		NeighborAddress:             *argNeighborAddress,
-		NeighborIPv6Address:         *argNeighborIPv6Address,
+		RouterID:                    *argRouterID,
 		NeighborAs:                  *argNeighborAs,
 		AuthPassword:                *argAuthPassword,
 		HoldTime:                    ht,
 		PprofPort:                   *argPprofPort,
+		NodeName:                    strings.ToLower(*argNodeName),
 		KubeConfigFile:              *argKubeConfigFile,
 		GracefulRestart:             *argGracefulRestart,
 		GracefulRestartDeferralTime: *argGracefulRestartDeferralTime,
 		GracefulRestartTime:         *argDefaultGracefulTime,
 		PassiveMode:                 *argPassiveMode,
-		EbgpMultihopTtl:             *argEbgpMultihopTtl,
+		EbgpMultihopTTL:             *argEbgpMultihopTTL,
 	}
 
-	if config.RouterId == "" {
-		config.RouterId = os.Getenv("POD_IP")
-		if config.RouterId == "" {
+	if *argNeighborAddress != "" {
+		config.NeighborAddresses = strings.Split(*argNeighborAddress, ",")
+		for _, addr := range config.NeighborAddresses {
+			if ip := net.ParseIP(addr); ip == nil || ip.To4() == nil {
+				return nil, fmt.Errorf("invalid neighbor-address format: %s", *argNeighborAddress)
+			}
+		}
+	}
+	if *argNeighborIPv6Address != "" {
+		config.NeighborIPv6Addresses = strings.Split(*argNeighborIPv6Address, ",")
+		for _, addr := range config.NeighborIPv6Addresses {
+			if ip := net.ParseIP(addr); ip == nil || ip.To16() == nil {
+				return nil, fmt.Errorf("invalid neighbor-ipv6-address format: %s", *argNeighborIPv6Address)
+			}
+		}
+	}
+
+	if config.RouterID == "" {
+		config.RouterID = os.Getenv("POD_IP")
+		if config.RouterID == "" {
 			return nil, errors.New("no router id or POD_IP")
 		}
 	}
@@ -200,7 +216,6 @@ func (config *Configuration) checkGracefulRestartOptions() error {
 
 func (config *Configuration) initBgpServer() error {
 	maxSize := 256 << 20
-	peersMap := make(map[api.Family_Afi]string)
 	var listenPort int32 = -1
 	grpcOpts := []grpc.ServerOption{grpc.MaxRecvMsgSize(maxSize), grpc.MaxSendMsgSize(maxSize)}
 	s := gobgp.NewBgpServer(
@@ -208,11 +223,9 @@ func (config *Configuration) initBgpServer() error {
 		gobgp.GrpcOption(grpcOpts))
 	go s.Serve()
 
-	if config.NeighborAddress != "" {
-		peersMap[api.Family_AFI_IP] = config.NeighborAddress
-	}
-	if config.NeighborIPv6Address != "" {
-		peersMap[api.Family_AFI_IP6] = config.NeighborIPv6Address
+	peersMap := map[api.Family_Afi][]string{
+		api.Family_AFI_IP:  config.NeighborAddresses,
+		api.Family_AFI_IP6: config.NeighborIPv6Addresses,
 	}
 
 	if config.PassiveMode {
@@ -221,63 +234,64 @@ func (config *Configuration) initBgpServer() error {
 	if err := s.StartBgp(context.Background(), &api.StartBgpRequest{
 		Global: &api.Global{
 			Asn:              config.ClusterAs,
-			RouterId:         config.RouterId,
+			RouterId:         config.RouterID,
 			ListenPort:       listenPort,
 			UseMultiplePaths: true,
 		},
 	}); err != nil {
 		return err
 	}
-	for ipFamily, address := range peersMap {
-		peer := &api.Peer{
-			Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: uint64(config.HoldTime)}},
-			Conf: &api.PeerConf{
-				NeighborAddress: address,
-				PeerAsn:         config.NeighborAs,
-			},
-			Transport: &api.Transport{
-				PassiveMode: config.PassiveMode,
-			},
-		}
-		if config.EbgpMultihopTtl != DefaultEbgpMultiHop {
-			peer.EbgpMultihop = &api.EbgpMultihop{
-				Enabled:     true,
-				MultihopTtl: uint32(config.EbgpMultihopTtl),
-			}
-		}
-		if config.AuthPassword != "" {
-			peer.Conf.AuthPassword = config.AuthPassword
-		}
-		if config.GracefulRestart {
-
-			if err := config.checkGracefulRestartOptions(); err != nil {
-				return err
-			}
-			peer.GracefulRestart = &api.GracefulRestart{
-				Enabled:         true,
-				RestartTime:     uint32(config.GracefulRestartTime.Seconds()),
-				DeferralTime:    uint32(config.GracefulRestartDeferralTime.Seconds()),
-				LocalRestarting: true,
-			}
-			peer.AfiSafis = []*api.AfiSafi{
-				{
-					Config: &api.AfiSafiConfig{
-						Family:  &api.Family{Afi: ipFamily, Safi: api.Family_SAFI_UNICAST},
-						Enabled: true,
-					},
-					MpGracefulRestart: &api.MpGracefulRestart{
-						Config: &api.MpGracefulRestartConfig{
-							Enabled: true,
-						},
-					},
+	for ipFamily, addresses := range peersMap {
+		for _, addr := range addresses {
+			peer := &api.Peer{
+				Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: uint64(config.HoldTime)}},
+				Conf: &api.PeerConf{
+					NeighborAddress: addr,
+					PeerAsn:         config.NeighborAs,
+				},
+				Transport: &api.Transport{
+					PassiveMode: config.PassiveMode,
 				},
 			}
-		}
+			if config.EbgpMultihopTTL != DefaultEbgpMultiHop {
+				peer.EbgpMultihop = &api.EbgpMultihop{
+					Enabled:     true,
+					MultihopTtl: uint32(config.EbgpMultihopTTL),
+				}
+			}
+			if config.AuthPassword != "" {
+				peer.Conf.AuthPassword = config.AuthPassword
+			}
+			if config.GracefulRestart {
+				if err := config.checkGracefulRestartOptions(); err != nil {
+					return err
+				}
+				peer.GracefulRestart = &api.GracefulRestart{
+					Enabled:         true,
+					RestartTime:     uint32(config.GracefulRestartTime.Seconds()),
+					DeferralTime:    uint32(config.GracefulRestartDeferralTime.Seconds()),
+					LocalRestarting: true,
+				}
+				peer.AfiSafis = []*api.AfiSafi{
+					{
+						Config: &api.AfiSafiConfig{
+							Family:  &api.Family{Afi: ipFamily, Safi: api.Family_SAFI_UNICAST},
+							Enabled: true,
+						},
+						MpGracefulRestart: &api.MpGracefulRestart{
+							Config: &api.MpGracefulRestartConfig{
+								Enabled: true,
+							},
+						},
+					},
+				}
+			}
 
-		if err := s.AddPeer(context.Background(), &api.AddPeerRequest{
-			Peer: peer,
-		}); err != nil {
-			return err
+			if err := s.AddPeer(context.Background(), &api.AddPeerRequest{
+				Peer: peer,
+			}); err != nil {
+				return err
+			}
 		}
 	}
 

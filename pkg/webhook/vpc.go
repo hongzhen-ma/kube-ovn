@@ -3,13 +3,13 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"github.com/kubeovn/kube-ovn/pkg/util"
 	"net/http"
 
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	ovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
+	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
 func (v *ValidatingHook) VpcCreateHook(ctx context.Context, req admission.Request) admission.Response {
@@ -36,7 +36,7 @@ func (v *ValidatingHook) VpcCreateHook(ctx context.Context, req admission.Reques
 	return ctrlwebhook.Allowed("by pass")
 }
 
-func (v *ValidatingHook) VpcUpdateHook(ctx context.Context, req admission.Request) admission.Response {
+func (v *ValidatingHook) VpcUpdateHook(_ context.Context, req admission.Request) admission.Response {
 	vpc := ovnv1.Vpc{}
 	if err := v.decoder.DecodeRaw(req.Object, &vpc); err != nil {
 		return ctrlwebhook.Errored(http.StatusBadRequest, err)
@@ -49,12 +49,12 @@ func (v *ValidatingHook) VpcUpdateHook(ctx context.Context, req admission.Reques
 	return ctrlwebhook.Allowed("by pass")
 }
 
-func (v *ValidatingHook) VpcDeleteHook(ctx context.Context, req admission.Request) admission.Response {
+func (v *ValidatingHook) VpcDeleteHook(_ context.Context, req admission.Request) admission.Response {
 	vpc := ovnv1.Vpc{}
 	if err := v.decoder.DecodeRaw(req.OldObject, &vpc); err != nil {
 		return ctrlwebhook.Errored(http.StatusBadRequest, err)
 	}
-	if 0 != len(vpc.Status.Subnets) {
+	if len(vpc.Status.Subnets) != 0 {
 		err := fmt.Errorf("can't delete vpc when any subnet in the vpc")
 		return ctrlwebhook.Denied(err.Error())
 	}

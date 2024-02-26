@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"gopkg.in/k8snetworkplumbingwg/multus-cni.v3/pkg/types"
+	"gopkg.in/k8snetworkplumbingwg/multus-cni.v4/pkg/types"
 	"k8s.io/klog/v2"
 )
 
@@ -20,12 +20,13 @@ func parsePodNetworkObjectName(podNetwork string) (string, string, string, error
 
 	klog.V(3).Infof("parsePodNetworkObjectName: %s", podNetwork)
 	slashItems := strings.Split(podNetwork, "/")
-	if len(slashItems) == 2 {
+	switch len(slashItems) {
+	case 2:
 		netNsName = strings.TrimSpace(slashItems[0])
 		networkName = slashItems[1]
-	} else if len(slashItems) == 1 {
+	case 1:
 		networkName = slashItems[0]
-	} else {
+	default:
 		klog.Errorf("parsePodNetworkObjectName: Invalid network object (failed at '/')")
 		return "", "", "", fmt.Errorf("parsePodNetworkObjectName: Invalid network object (failed at '/')")
 	}

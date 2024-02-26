@@ -2,29 +2,27 @@ package main
 
 import (
 	"flag"
+	"os"
 
+	"github.com/spf13/pflag"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/klogr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	ovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 	ovnwebhook "github.com/kubeovn/kube-ovn/pkg/webhook"
 	"github.com/kubeovn/kube-ovn/versions"
-	"github.com/spf13/pflag"
 )
 
-const (
-	hookServerCertDir = "/tmp/k8s-webhook-server/serving-certs"
-)
+const hookServerCertDir = "/tmp/k8s-webhook-server/serving-certs"
 
-var (
-	scheme = runtime.NewScheme()
-)
+var scheme = runtime.NewScheme()
 
 func init() {
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -39,10 +37,10 @@ func init() {
 }
 
 func main() {
-	var port int
 	klog.Infof(versions.String())
 
-	port = *pflag.Int("port", 8443, "The port webhook listen on.")
+	port := pflag.Int("port", 8443, "The port webhook listen on.")
+	healthProbePort := pflag.Int32("health-probe-port", 8080, "The port health probes listen on.")
 
 	klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
 	klog.InitFlags(klogFlags)
@@ -63,33 +61,43 @@ func main() {
 	pflag.Parse()
 
 	// set logger for controller-runtime framework
-	ctrl.SetLogger(klogr.New())
+	ctrl.SetLogger(klog.NewKlogr())
 
 	// Create a webhook server.
-	hookServer := &ctrlwebhook.Server{
-		Port:    port,
+	hookServer := ctrlwebhook.NewServer(ctrlwebhook.Options{
+		Port:    *port,
 		CertDir: hookServerCertDir,
-	}
+	})
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		// disable metrics to avoid port conflict
-		MetricsBindAddress: "0",
+		Metrics: metricsserver.Options{
+			BindAddress: "0",
+		},
+		HealthProbeBindAddress: util.JoinHostPort(os.Getenv("POD_IP"), *healthProbePort),
 	})
 	if err != nil {
 		panic(err)
 	}
 
-	validatingHook, err := ovnwebhook.NewValidatingHook(mgr.GetCache())
+	validatingHook, err := ovnwebhook.NewValidatingHook(mgr.GetClient(), mgr.GetScheme(), mgr.GetCache())
 	if err != nil {
 		panic(err)
 	}
 
-	klog.Infof("register path /validate-ip")
+	klog.Infof("register path /validating")
 	// Register the webhooks in the server.
-	hookServer.Register("/validate-ip", &ctrlwebhook.Admission{Handler: validatingHook})
+	hookServer.Register("/validating", &ctrlwebhook.Admission{Handler: validatingHook})
 
 	if err := mgr.Add(hookServer); err != nil {
+		panic(err)
+	}
+
+	if err = mgr.AddHealthzCheck("liveness probe", healthz.Ping); err != nil {
+		panic(err)
+	}
+	if err = mgr.AddReadyzCheck("readiness probe", healthz.Ping); err != nil {
 		panic(err)
 	}
 

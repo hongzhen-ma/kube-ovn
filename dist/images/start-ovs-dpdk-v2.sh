@@ -1,6 +1,11 @@
 #!/bin/bash
 
 set -euo pipefail
+OVN_REMOTE_PROBE_INTERVAL=${OVN_REMOTE_PROBE_INTERVAL:-10000}
+OVN_REMOTE_OPENFLOW_INTERVAL=${OVN_REMOTE_OPENFLOW_INTERVAL:-180}
+
+echo "OVN_REMOTE_PROBE_INTERVAL is set to $OVN_REMOTE_PROBE_INTERVAL"
+echo "OVN_REMOTE_OPENFLOW_INTERVAL is set to $OVN_REMOTE_OPENFLOW_INTERVAL"
 
 DPDK_TUNNEL_IFACE=${DPDK_TUNNEL_IFACE:-br-phy}
 TUNNEL_TYPE=${TUNNEL_TYPE:-geneve}
@@ -85,20 +90,25 @@ done
 
 case ${BOND_TYPE} in
   "")
-    ovs-vsctl --timeout 10 add-port ${DPDK_TUNNEL_IFACE} dpdk0 ${OPTS};;
+    ovs-vsctl --timeout 10 add-port ${DPDK_TUNNEL_IFACE} dpdk0 -- set Interface dpdk0 type=dpdk options:dpdk-devargs=${DPDK_DEV[0]}
+    ;;
   "active-backup"|1)
     ovs-vsctl --timeout 10 add-bond ${DPDK_TUNNEL_IFACE} dpdk0 ${IPS} ${OPTS}
-    ovs-vsctl set port dpdk0 bond_mode=active-backup;;
+    ovs-vsctl set port dpdk0 bond_mode=active-backup
+    ;;
   "balance-slb"|0)
     ovs-vsctl --timeout 10 add-bond ${DPDK_TUNNEL_IFACE} dpdk0 ${IPS} ${OPTS}
-    ovs-vsctl set port dpdk0 bond_mode=balance-slb;;
+    ovs-vsctl set port dpdk0 bond_mode=balance-slb
+    ;;
   "lacp"|4)
     ovs-vsctl --timeout 10 add-bond ${DPDK_TUNNEL_IFACE} dpdk0 ${IPS} ${OPTS}
     ovs-vsctl set port dpdk0 bond_mode=balance-tcp
-    ovs-vsctl set port dpdk0 lacp=active;;
+    ovs-vsctl set port dpdk0 lacp=active
+    ;;
   *)
     echo "wrong ovs dpdk bond_type config"
-    exit 1;;
+    exit 1
+    ;;
 esac
 
 ovs-vsctl set port ${DPDK_TUNNEL_IFACE} tag=${VLAN_TAG}
@@ -121,8 +131,8 @@ ovn-ctl restart_controller
 
 # Set remote ovn-sb for ovn-controller to connect to
 ovs-vsctl set open . external-ids:ovn-remote=tcp:"${OVN_SB_SERVICE_HOST}":"${OVN_SB_SERVICE_PORT}"
-ovs-vsctl set open . external-ids:ovn-remote-probe-interval=10000
-ovs-vsctl set open . external-ids:ovn-openflow-probe-interval=180
+ovs-vsctl set open . external-ids:ovn-remote-probe-interval="${OVN_REMOTE_PROBE_INTERVAL}"
+ovs-vsctl set open . external-ids:ovn-openflow-probe-interval="${OVN_REMOTE_OPENFLOW_INTERVAL}"
 ovs-vsctl set open . external-ids:ovn-encap-type="${TUNNEL_TYPE}"
 
 tail --follow=name --retry /var/log/openvswitch/ovs-vswitchd.log

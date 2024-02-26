@@ -33,17 +33,49 @@ spec:
       hostNetwork: true
       containers:
         - name: kube-ovn-webhook
-          image: "kubeovn/kube-ovn:v1.12.0"
+          image: "kubeovn/kube-ovn:v1.13.0"
           imagePullPolicy: IfNotPresent
           command:
             - /kube-ovn/kube-ovn-webhook
           args:
             - --port=8443
+            - --health-probe-port=8080
             - --v=3
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
           volumeMounts:
             - mountPath: /tmp/k8s-webhook-server/serving-certs
               name: cert
               readOnly: true
+          ports:
+          - containerPort: 8443
+            name: https
+            protocol: TCP
+          - containerPort: 8080
+            name: health-probe
+            protocol: TCP
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
       volumes:
         - name: cert
           secret:
@@ -131,7 +163,7 @@ webhooks:
     service:
       namespace: kube-system
       name: kube-ovn-webhook
-      path: /validate-ip
+      path: /validating
       port: 443
 ---
 apiVersion: cert-manager.io/v1

@@ -1,12 +1,11 @@
 package ovs
 
 import (
-	"context"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/ovn-org/libovsdb/ovsdb"
+	"k8s.io/klog/v2"
 
 	ovsclient "github.com/kubeovn/kube-ovn/pkg/ovsdb/client"
 	"github.com/kubeovn/kube-ovn/pkg/ovsdb/ovnnb"
@@ -24,11 +23,17 @@ const (
 )
 
 // CreateGatewayLogicalSwitch create gateway switch connect external networks
-func (c *ovnClient) CreateGatewayLogicalSwitch(lsName, lrName, provider, ip, mac string, vlanID int, chassises ...string) error {
+func (c *OVNNbClient) CreateGatewayLogicalSwitch(lsName, lrName, provider, ip, mac string, vlanID int, chassises ...string) error {
 	lspName := fmt.Sprintf("%s-%s", lsName, lrName)
 	lrpName := fmt.Sprintf("%s-%s", lrName, lsName)
-	localnetLspName := fmt.Sprintf("ln-%s", lsName)
 
+	// delete old localnet lsp when upgrade before v1.12
+	oldLocalnetLspName := fmt.Sprintf("ln-%s", lsName)
+	if err := c.DeleteLogicalSwitchPort(oldLocalnetLspName); err != nil {
+		return fmt.Errorf("failed to delete old localnet %s: %v", oldLocalnetLspName, err)
+	}
+
+	localnetLspName := GetLocalnetName(lsName)
 	if err := c.CreateBareLogicalSwitch(lsName); err != nil {
 		return fmt.Errorf("create logical switch %s: %v", lsName, err)
 	}
@@ -37,18 +42,16 @@ func (c *ovnClient) CreateGatewayLogicalSwitch(lsName, lrName, provider, ip, mac
 		return fmt.Errorf("create localnet logical switch port %s: %v", localnetLspName, err)
 	}
 
-	if err := c.CreateLogicalPatchPort(lsName, lrName, lspName, lrpName, ip, mac, chassises...); err != nil {
-		return err
-	}
-
-	return nil
+	return c.CreateLogicalPatchPort(lsName, lrName, lspName, lrpName, ip, mac, chassises...)
 }
 
 // CreateLogicalPatchPort create logical router port and associated logical switch port which type is router
-func (c *ovnClient) CreateLogicalPatchPort(lsName, lrName, lspName, lrpName, ip, mac string, chassises ...string) error {
+func (c *OVNNbClient) CreateLogicalPatchPort(lsName, lrName, lspName, lrpName, ip, mac string, chassises ...string) error {
 	if len(ip) != 0 {
 		// check ip format: 192.168.231.1/24,fc00::0af4:01/112
 		if err := util.CheckCidrs(ip); err != nil {
+			err := fmt.Errorf("invalid ip %s: %v", ip, err)
+			klog.Error(err)
 			return err
 		}
 	}
@@ -56,23 +59,28 @@ func (c *ovnClient) CreateLogicalPatchPort(lsName, lrName, lspName, lrpName, ip,
 	/* create router port */
 	ops, err := c.CreateRouterPortOp(lsName, lrName, lspName, lrpName, ip, mac)
 	if err != nil {
-		return fmt.Errorf("generate operations for creating patch port: %v", err)
-	}
-
-	if err = c.Transact("lrp-lsp-add", ops); err != nil {
-		return fmt.Errorf("create logical patch port %s and %s: %v", lspName, lrpName, err)
-	}
-
-	/* create gateway chassises for logical router port */
-	if err = c.CreateGatewayChassises(lrpName, chassises...); err != nil {
+		err := fmt.Errorf("generate operations for creating patch port: %v", err)
+		klog.Error(err)
 		return err
 	}
 
+	if err = c.Transact("lrp-lsp-add", ops); err != nil {
+		err := fmt.Errorf("create logical patch port %s and %s: %v", lspName, lrpName, err)
+		klog.Error(err)
+		return err
+	}
+
+	/* create gateway chassises for logical router port */
+	if err := c.CreateGatewayChassises(lrpName, chassises...); err != nil {
+		err := fmt.Errorf("create gateway chassises for logical router port %s: %v", lrpName, err)
+		klog.Error(err)
+		return err
+	}
 	return nil
 }
 
 // DeleteLogicalGatewaySwitch delete gateway switch and corresponding port
-func (c *ovnClient) DeleteLogicalGatewaySwitch(lsName, lrName string) error {
+func (c *OVNNbClient) DeleteLogicalGatewaySwitch(lsName, lrName string) error {
 	lrpName := fmt.Sprintf("%s-%s", lrName, lsName)
 
 	// all corresponding logical switch port(e.g. localnet port and normal port) will be deleted when delete logical switch
@@ -97,11 +105,11 @@ func (c *ovnClient) DeleteLogicalGatewaySwitch(lsName, lrName string) error {
 	return nil
 }
 
-func (c *ovnClient) DeleteSecurityGroup(sgName string) error {
+func (c *OVNNbClient) DeleteSecurityGroup(sgName string) error {
 	pgName := GetSgPortGroupName(sgName)
 
 	// clear acl
-	if err := c.DeleteAcls(pgName, portGroupKey, ""); err != nil {
+	if err := c.DeleteAcls(pgName, portGroupKey, "", nil); err != nil {
 		return fmt.Errorf("delete acls from port group %s: %v", pgName, err)
 	}
 
@@ -117,14 +125,10 @@ func (c *ovnClient) DeleteSecurityGroup(sgName string) error {
 	}
 
 	// delete pg
-	if err := c.DeletePortGroup(pgName); err != nil {
-		return err
-	}
-
-	return nil
+	return c.DeletePortGroup(pgName)
 }
 
-func (c *ovnClient) CreateRouterPortOp(lsName, lrName, lspName, lrpName, ip, mac string) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) CreateRouterPortOp(lsName, lrName, lspName, lrpName, ip, mac string) ([]ovsdb.Operation, error) {
 	/* do nothing if logical switch port exist */
 	lspExist, err := c.LogicalSwitchPortExists(lspName)
 	if err != nil {
@@ -173,7 +177,7 @@ func (c *ovnClient) CreateRouterPortOp(lsName, lrName, lspName, lrpName, ip, mac
 }
 
 // RemoveLogicalPatchPort delete logical router port and associated logical switch port which type is router
-func (c *ovnClient) RemoveLogicalPatchPort(lspName, lrpName string) error {
+func (c *OVNNbClient) RemoveLogicalPatchPort(lspName, lrpName string) error {
 	/* delete logical switch port*/
 	lspDelOp, err := c.DeleteLogicalSwitchPortOp(lspName)
 	if err != nil {
@@ -192,26 +196,6 @@ func (c *ovnClient) RemoveLogicalPatchPort(lspName, lrpName string) error {
 
 	if err = c.Transact("lrp-lsp-del", ops); err != nil {
 		return fmt.Errorf("delete logical switch port %s and delete logical router port %s: %v", lspName, lrpName, err)
-	}
-
-	return nil
-}
-
-// GetEntityInfo get entity info by column which is the index,
-// reference to ovn-nb.ovsschema(ovsdb-client get-schema unix:/var/run/ovn/ovnnb_db.sock OVN_Northbound) for more information,
-// UUID is index
-func (c *ovnClient) GetEntityInfo(entity interface{}) error {
-	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
-	defer cancel()
-
-	entityPtr := reflect.ValueOf(entity)
-	if entityPtr.Kind() != reflect.Pointer {
-		return fmt.Errorf("entity must be pointer")
-	}
-
-	err := c.Get(ctx, entity)
-	if err != nil {
-		return err
 	}
 
 	return nil

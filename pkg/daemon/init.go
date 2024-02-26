@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -40,9 +41,6 @@ func InitOVSBridges() (map[string]string, error) {
 					return nil, fmt.Errorf("failed to check vendor of port %s: %v", port, err)
 				}
 				if ok {
-					if _, err = configProviderNic(port, brName); err != nil {
-						return nil, err
-					}
 					mappings[port] = brName
 				}
 			}
@@ -62,7 +60,7 @@ func InitNodeGateway(config *Configuration) error {
 			klog.Errorf("failed to get node %s info %v", nodeName, err)
 			return err
 		}
-		if node.Annotations[util.IpAddressAnnotation] == "" {
+		if node.Annotations[util.IPAddressAnnotation] == "" {
 			klog.Warningf("no ovn0 address for node %s, please check kube-ovn-controller logs", nodeName)
 			time.Sleep(3 * time.Second)
 			continue
@@ -71,21 +69,24 @@ func InitNodeGateway(config *Configuration) error {
 			klog.Errorf("validate node %s address annotation failed, %v", nodeName, err)
 			time.Sleep(3 * time.Second)
 			continue
-		} else {
-			macAddr = node.Annotations[util.MacAddressAnnotation]
-			ip = node.Annotations[util.IpAddressAnnotation]
-			cidr = node.Annotations[util.CidrAnnotation]
-			portName = node.Annotations[util.PortNameAnnotation]
-			gw = node.Annotations[util.GatewayAnnotation]
-			break
 		}
+		macAddr = node.Annotations[util.MacAddressAnnotation]
+		ip = node.Annotations[util.IPAddressAnnotation]
+		cidr = node.Annotations[util.CidrAnnotation]
+		portName = node.Annotations[util.PortNameAnnotation]
+		gw = node.Annotations[util.GatewayAnnotation]
+		break
 	}
 	mac, err := net.ParseMAC(macAddr)
 	if err != nil {
 		return fmt.Errorf("failed to parse mac %s %v", mac, err)
 	}
 
-	ipAddr = util.GetIpAddrWithMask(ip, cidr)
+	ipAddr, err = util.GetIPAddrWithMask(ip, cidr)
+	if err != nil {
+		klog.Errorf("failed to get ip %s with mask %s, %v", ip, cidr, err)
+		return err
+	}
 	return configureNodeNic(portName, ipAddr, gw, mac, config.MTU)
 }
 
@@ -96,11 +97,11 @@ func InitMirror(config *Configuration) error {
 	return configureEmptyMirror(config.MirrorNic, config.MTU)
 }
 
-func ovsInitProviderNetwork(provider, nic string, exchangeLinkName, macLearningFallback bool) (int, error) {
+func (c *Controller) ovsInitProviderNetwork(provider, nic string, exchangeLinkName, macLearningFallback bool) (int, error) {
 	// create and configure external bridge
 	brName := util.ExternalBridgeName(provider)
 	if exchangeLinkName {
-		exchanged, err := changeProvideNicName(nic, brName)
+		exchanged, err := c.changeProvideNicName(nic, brName)
 		if err != nil {
 			klog.Errorf("failed to change provider nic name from %s to %s: %v", nic, brName, err)
 			return 0, err
@@ -111,7 +112,7 @@ func ovsInitProviderNetwork(provider, nic string, exchangeLinkName, macLearningF
 	}
 
 	klog.V(3).Infof("configure external bridge %s", brName)
-	if err := configExternalBridge(provider, brName, nic, exchangeLinkName, macLearningFallback); err != nil {
+	if err := c.configExternalBridge(provider, brName, nic, exchangeLinkName, macLearningFallback); err != nil {
 		errMsg := fmt.Errorf("failed to create and configure external bridge %s: %v", brName, err)
 		klog.Error(errMsg)
 		return 0, errMsg
@@ -125,7 +126,8 @@ func ovsInitProviderNetwork(provider, nic string, exchangeLinkName, macLearningF
 	}
 
 	// add host nic to the external bridge
-	mtu, err := configProviderNic(nic, brName)
+	klog.Infof("config provider nic %s on bridge %s", nic, brName)
+	mtu, err := c.configProviderNic(nic, brName)
 	if err != nil {
 		errMsg := fmt.Errorf("failed to add nic %s to external bridge %s: %v", nic, brName, err)
 		klog.Error(errMsg)
@@ -135,60 +137,24 @@ func ovsInitProviderNetwork(provider, nic string, exchangeLinkName, macLearningF
 	return mtu, nil
 }
 
-func ovsCleanProviderNetwork(provider string) error {
-	output, err := ovs.Exec(ovs.IfExists, "get", "open", ".", "external-ids:ovn-bridge-mappings")
+func (c *Controller) ovsCleanProviderNetwork(provider string) error {
+	mappings, err := getOvnMappings("ovn-bridge-mappings")
 	if err != nil {
-		return fmt.Errorf("failed to get ovn-bridge-mappings, %v: %q", err, output)
+		klog.Error(err)
+		return err
 	}
 
-	var idx int
-	var m, brName string
-	mappingPrefix := provider + ":"
-	brMappings := strings.Split(output, ",")
-	for idx, m = range brMappings {
-		if strings.HasPrefix(m, mappingPrefix) {
-			brName = m[len(mappingPrefix):]
-			klog.V(3).Infof("found bridge name for provider %s: %s", provider, brName)
-			break
-		}
+	brName := mappings[provider]
+	if brName == "" {
+		return nil
 	}
 
-	if idx != len(brMappings) {
-		brMappings = append(brMappings[:idx], brMappings[idx+1:]...)
-		if len(brMappings) == 0 {
-			output, err = ovs.Exec(ovs.IfExists, "remove", "open", ".", "external-ids", "ovn-bridge-mappings")
-		} else {
-			output, err = ovs.Exec("set", "open", ".", "external-ids:ovn-bridge-mappings="+strings.Join(brMappings, ","))
-		}
-		if err != nil {
-			return fmt.Errorf("failed to set ovn-bridge-mappings, %v: %q", err, output)
-		}
-	}
-
-	if output, err = ovs.Exec(ovs.IfExists, "get", "open", ".", "external-ids:ovn-chassis-mac-mappings"); err != nil {
-		return fmt.Errorf("failed to get ovn-chassis-mac-mappings, %v: %q", err, output)
-	}
-	macMappings := strings.Split(output, ",")
-	for _, macMap := range macMappings {
-		if strings.HasPrefix(macMap, mappingPrefix) {
-			macMappings = util.RemoveString(macMappings, macMap)
-			break
-		}
-	}
-	if len(macMappings) == 0 {
-		output, err = ovs.Exec(ovs.IfExists, "remove", "open", ".", "external-ids", "ovn-chassis-mac-mappings")
-	} else {
-		output, err = ovs.Exec("set", "open", ".", "external-ids:ovn-chassis-mac-mappings="+strings.Join(macMappings, ","))
-	}
+	output, err := ovs.Exec("list-br")
 	if err != nil {
-		return fmt.Errorf("failed to set ovn-chassis-mac-mappings, %v: %q", err, output)
+		return fmt.Errorf("failed to list OVS bridges: %v, %q", err, output)
 	}
 
-	if output, err = ovs.Exec("list-br"); err != nil {
-		return fmt.Errorf("failed to list OVS bridge %v: %q", err, output)
-	}
-
-	if !util.ContainsString(strings.Split(output, "\n"), brName) {
+	if !slices.Contains(strings.Split(output, "\n"), brName) {
 		klog.V(3).Infof("ovs bridge %s not found", brName)
 		return nil
 	}
@@ -201,8 +167,15 @@ func ovsCleanProviderNetwork(provider string) error {
 	// remove host nic from the external bridge
 	if output != "" {
 		for _, port := range strings.Split(output, "\n") {
+			// patch port created by ovn-controller has an external ID ovn-localnet-port=localnet.<SUBNET>
+			if output, err = ovs.Exec("--data=bare", "--no-heading", "--columns=_uuid", "find", "port", "name="+port, `external-ids:ovn-localnet-port!=""`); err != nil {
+				return fmt.Errorf("failed to find ovs port %s, %v: %q", port, err, output)
+			}
+			if output != "" {
+				continue
+			}
 			klog.V(3).Infof("removing ovs port %s from bridge %s", port, brName)
-			if err = removeProviderNic(port, brName); err != nil {
+			if err = c.removeProviderNic(port, brName); err != nil {
 				errMsg := fmt.Errorf("failed to remove port %s from external bridge %s: %v", port, brName, err)
 				klog.Error(errMsg)
 				return errMsg
@@ -219,11 +192,15 @@ func ovsCleanProviderNetwork(provider string) error {
 	klog.V(3).Infof("ovs bridge %s has been deleted", brName)
 
 	if br := util.ExternalBridgeName(provider); br != brName {
-		if _, err = changeProvideNicName(br, brName); err != nil {
+		if _, err = c.changeProvideNicName(br, brName); err != nil {
 			klog.Errorf("failed to change provider nic name from %s to %s: %v", br, brName, err)
 			return err
 		}
 	}
 
-	return nil
+	if err := removeOvnMapping("ovn-chassis-mac-mappings", provider); err != nil {
+		klog.Error(err)
+		return err
+	}
+	return removeOvnMapping("ovn-bridge-mappings", provider)
 }

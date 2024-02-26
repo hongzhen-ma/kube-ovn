@@ -1,6 +1,18 @@
 #!/bin/bash
 set -eo pipefail
 
+DEBUG_WRAPPER=${DEBUG_WRAPPER:-}
+ENABLE_COMPACT=${ENABLE_COMPACT:-false}
+PROBE_INTERVAL=${PROBE_INTERVAL:-180000}
+OVN_NORTHD_N_THREADS=${OVN_NORTHD_N_THREADS:-1}
+OVN_VERSION_COMPATIBILITY=${OVN_VERSION_COMPATIBILITY:-}
+DEBUG_OPT="--ovn-northd-wrapper=$DEBUG_WRAPPER --ovsdb-nb-wrapper=$DEBUG_WRAPPER --ovsdb-sb-wrapper=$DEBUG_WRAPPER"
+
+echo "PROBE_INTERVAL is set to $PROBE_INTERVAL"
+echo "OVN_LEADER_PROBE_INTERVAL is set to $OVN_LEADER_PROBE_INTERVAL"
+echo "OVN_NORTHD_N_THREADS is set to $OVN_NORTHD_N_THREADS"
+echo "ENABLE_COMPACT is set to $ENABLE_COMPACT"
+
 # https://bugs.launchpad.net/neutron/+bug/1776778
 if grep -q "3.10.0-862" /proc/version
 then
@@ -34,6 +46,13 @@ if [[ $ENABLE_BIND_LOCAL_IP == "true" ]]; then
     DB_ADDR="$POD_IP"
     DB_ADDRESSES="$POD_IPS"
 fi
+
+SSL_OPTIONS=
+function ssl_options() {
+    if "$ENABLE_SSL" != "false" ]; then
+        SSL_OPTIONS="-p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert"
+    fi
+}
 
 . /usr/share/openvswitch/scripts/ovs-lib || exit 1
 
@@ -97,7 +116,7 @@ function ovndb_query_leader {
     if [[ "$ENABLE_SSL" == "false" ]]; then 
         timeout 10 ovsdb-client query $(gen_conn_addr $i $port) "$query"
     else
-        timeout 10 ovsdb-client -p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert query $(gen_conn_addr $i $port) "$query"
+        timeout 10 ovsdb-client $SSL_OPTIONS query $(gen_conn_addr $i $port) "$query"
     fi
 }
 
@@ -114,6 +133,14 @@ function is_clustered {
       fi
     done
   return 1
+}
+
+function set_nb_version_compatibility() {
+    if [ -n "$OVN_VERSION_COMPATIBILITY" ]; then
+        if ! ovn-nbctl --db=$(gen_conn_str 6641) $SSL_OPTIONS get NB_Global . options | grep -qw version_compatibility=; then
+            ovn-nbctl --db=$(gen_conn_str 6641) $SSL_OPTIONS set NB_Global . options:version_compatibility=${OVN_VERSION_COMPATIBILITY}
+        fi
+    fi
 }
 
 # create a new db file and join it to the cluster
@@ -138,39 +165,55 @@ function ovn_db_pre_start() {
 
     local db_file="/etc/ovn/ovn${1}_db.db"
     if [ -e "$db_file" ]; then
-        if ! ovsdb_tool check-cluster "$db_file"; then
-            echo "detected database corruption for file $db_file, rebuild it."
-            local sid=$(ovsdb-tool db-sid "$db_file")
-            if ! echo -n "$sid" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
-                echo "failed to get sid from $1 db file $db_file"
-                return 1
-            fi
-            echo "get local server id $sid"
-
-            eval port="\$${db_eval}_CLUSTER_PORT"
-            local local_addr="$(gen_conn_addr $DB_CLUSTER_ADDR $port)"
-            echo "local address: $local_addr"
-
-            local remote_addr=()
-            local node_ips=$(echo -n "${NODE_IPS}" | sed 's/,/ /g')
-            for node_ip in ${node_ips[*]}; do
-                if [ ! "$node_ip" = "$DB_CLUSTER_ADDR" ]; then
-                    remote_addr=(${remote_addr[*]} "$(gen_conn_addr $ip $port)")
+        if ovsdb-tool db-is-clustered "$db_file"; then
+            local msg=$(ovsdb-tool check-cluster "$db_file" 2>&1) || true
+            if echo $msg | grep -q 'has not joined the cluster'; then
+                local birth_time=$(stat --format=%W $db_file)
+                local now=$(date +%s)
+                if [ $(($now - $birth_time)) -ge 120 ]; then
+                    echo "ovn db file $db_file exists for more than 120s, remove it."
+                    rm -f "$db_file" || return 1
                 fi
-            done
-            echo "remote addresses: ${remote_addr[*]}"
+                return
+            fi
 
-            local db_new="$db_file.init-$(random_str)"
-            echo "generating new database file $db_new"
-            if [ ${#remote_addr[*]} -ne 0 ]; then
-                ovsdb_tool --sid $sid join-cluster "$db_new" $db $local_addr ${remote_addr[*]} || return 1
-
-                local db_bak="$db_file.backup-$(random_str)"
+            if ! ovsdb-tool check-cluster "$db_file"; then
+                local db_bak="$db_file.backup-$(date +%s)-$(random_str)"
                 echo "backup $db_file to $db_bak"
-                mv "$db_file" "$db_bak" || return 1
+                cp "$db_file" "$db_bak" || return 1
 
-                echo "use new database file $db_new"
-                mv "$db_new" "$db_file"
+                echo "detected database corruption for file $db_file, try to fix it."
+                if ! ovsdb-tool fix-cluster "$db_file"; then
+                    echo "failed to fix database file $db_file, rebuild it."
+                    local sid=$(ovsdb-tool db-sid "$db_file")
+                    if ! echo -n "$sid" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+                        echo "failed to get sid from db file $db_file"
+                        return 1
+                    fi
+                    echo "get local server id $sid"
+
+                    eval port="\$${db_eval}_CLUSTER_PORT"
+                    local local_addr="$(gen_conn_addr $DB_CLUSTER_ADDR $port)"
+                    echo "local address: $local_addr"
+
+                    local remote_addr=()
+                    local node_ips=$(echo -n "${NODE_IPS}" | sed 's/,/ /g')
+                    for node_ip in ${node_ips[*]}; do
+                        if [ ! "$node_ip" = "$DB_CLUSTER_ADDR" ]; then
+                            remote_addr=(${remote_addr[*]} "$(gen_conn_addr $node_ip $port)")
+                        fi
+                    done
+                    echo "remote addresses: ${remote_addr[*]}"
+
+                    local db_new="$db_file.init-$(date +%s)-$(random_str)"
+                    echo "generating new database file $db_new"
+                    if [ ${#remote_addr[*]} -ne 0 ]; then
+                        ovsdb-tool --sid $sid join-cluster "$db_new" $db $local_addr ${remote_addr[*]} || return 1
+
+                        echo "use new database file $db_new"
+                        mv "$db_new" "$db_file"
+                    fi
+                fi
             fi
         fi
     fi
@@ -205,13 +248,14 @@ if [[ "$ENABLE_SSL" == "false" ]]; then
     if [[ -z "$NODE_IPS" ]]; then
         /usr/share/ovn/scripts/ovn-ctl restart_northd
         ovn-nbctl --no-leader-only set-connection ptcp:"${NB_PORT}":["${DB_ADDR}"]
-        ovn-nbctl --no-leader-only set Connection . inactivity_probe=180000
+        ovn-nbctl --no-leader-only set Connection . inactivity_probe=${PROBE_INTERVAL}
+        ovn-nbctl --no-leader-only set NB_Global . options:northd_probe_interval=${PROBE_INTERVAL}
         ovn-nbctl --no-leader-only set NB_Global . options:use_logical_dp_groups=true
 
         ovn-sbctl --no-leader-only set-connection ptcp:"${SB_PORT}":["${DB_ADDR}"]
-        ovn-sbctl --no-leader-only set Connection . inactivity_probe=180000
+        ovn-sbctl --no-leader-only set Connection . inactivity_probe=${PROBE_INTERVAL}
     else
-        if [[ ! "$NODE_IPS" =~ "$DB_CLUSTER_ADDR" ]]; then
+        if ! echo "$NODE_IPS" | tr ',' '\n' | grep '^'`echo "$DB_CLUSTER_ADDR" | sed 's/\./\\\./g'`'$'; then
             echo "ERROR! host ip $DB_CLUSTER_ADDR not in env NODE_IPS $NODE_IPS"
             exit 1
         fi
@@ -225,9 +269,10 @@ if [[ "$ENABLE_SSL" == "false" ]]; then
         is_clustered
         result=$?
         set -eo pipefail
-        # leader up only when no cluster and on first node
+        # leader up only when no cluster and on the first/only node
         if [[ ${result} -eq 1 && "$nb_leader_ip" == "$DB_CLUSTER_ADDR" ]]; then
-            ovn_ctl_args="--db-nb-create-insecure-remote=yes \
+            ovn_ctl_args="$DEBUG_OPT \
+                --db-nb-create-insecure-remote=yes \
                 --db-sb-create-insecure-remote=yes \
                 --db-nb-cluster-local-addr=[$DB_CLUSTER_ADDR] \
                 --db-sb-cluster-local-addr=[$DB_CLUSTER_ADDR] \
@@ -240,7 +285,7 @@ if [[ "$ENABLE_SSL" == "false" ]]; then
                 --db-nb-use-remote-in-db=no \
                 --db-sb-use-remote-in-db=no \
                 --ovn-northd-nb-db=$(gen_conn_str 6641) \
-                --ovn-northd-sb-db=$(gen_conn_str 6642)"
+                --ovn-northd-sb-db=$(gen_conn_str 6642) "
             # Start ovn-northd, ovn-nb and ovn-sb
             /usr/share/ovn/scripts/ovn-ctl $ovn_ctl_args \
                 start_nb_ovsdb -- \
@@ -250,9 +295,12 @@ if [[ "$ENABLE_SSL" == "false" ]]; then
                 start_sb_ovsdb -- \
                 --remote=db:Local_Config,Config,connections \
                 /etc/ovn/ovnsb_local_config.db
+            set_nb_version_compatibility
             /usr/share/ovn/scripts/ovn-ctl $ovn_ctl_args \
-                --ovn-manage-ovsdb=no start_northd
-            ovn-nbctl --no-leader-only set NB_Global . options:northd_probe_interval=180000
+                --ovn-manage-ovsdb=no --ovn-northd-n-threads="${OVN_NORTHD_N_THREADS}" start_northd
+            ovn-nbctl --no-leader-only set NB_Global . options:inactivity_probe=${PROBE_INTERVAL}
+            ovn-sbctl --no-leader-only set SB_Global . options:inactivity_probe=${PROBE_INTERVAL}
+            ovn-nbctl --no-leader-only set NB_Global . options:northd_probe_interval=${PROBE_INTERVAL}
             ovn-nbctl --no-leader-only set NB_Global . options:use_logical_dp_groups=true
         else
             # known leader always first
@@ -280,7 +328,8 @@ if [[ "$ENABLE_SSL" == "false" ]]; then
             fi
             set -eo pipefail
             # otherwise go to first node
-            ovn_ctl_args="--db-nb-create-insecure-remote=yes \
+            ovn_ctl_args="$DEBUG_OPT \
+                --db-nb-create-insecure-remote=yes \
                 --db-sb-create-insecure-remote=yes \
                 --db-nb-cluster-local-addr=[$DB_CLUSTER_ADDR] \
                 --db-sb-cluster-local-addr=[$DB_CLUSTER_ADDR] \
@@ -311,9 +360,11 @@ if [[ "$ENABLE_SSL" == "false" ]]; then
                 -- \
                 --remote=db:Local_Config,Config,connections \
                 /etc/ovn/ovnsb_local_config.db
+            set_nb_version_compatibility
             /usr/share/ovn/scripts/ovn-ctl \
                 $ovn_ctl_args \
                 --ovn-manage-ovsdb=no \
+                --ovn-northd-n-threads="${OVN_NORTHD_N_THREADS}" \
                 start_northd
         fi
     fi
@@ -329,15 +380,16 @@ else
             --ovn-northd-ssl-key=/var/run/tls/key \
             --ovn-northd-ssl-cert=/var/run/tls/cert \
             --ovn-northd-ssl-ca-cert=/var/run/tls/cacert \
+            --ovn-northd-n-threads="${OVN_NORTHD_N_THREADS}" \
             restart_northd
-        ovn-nbctl --no-leader-only -p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert set-connection pssl:"${NB_PORT}":["${DB_ADDR}"]
-        ovn-nbctl --no-leader-only -p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert set Connection . inactivity_probe=180000
-        ovn-nbctl --no-leader-only -p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert set NB_Global . options:use_logical_dp_groups=true
+        ovn-nbctl --no-leader-only $SSL_OPTIONS set-connection pssl:"${NB_PORT}":["${DB_ADDR}"]
+        ovn-nbctl --no-leader-only $SSL_OPTIONS set Connection . inactivity_probe=${PROBE_INTERVAL}
+        ovn-nbctl --no-leader-only $SSL_OPTIONS set NB_Global . options:use_logical_dp_groups=true
 
-        ovn-sbctl --no-leader-only -p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert set-connection pssl:"${SB_PORT}":["${DB_ADDR}"]
-        ovn-sbctl --no-leader-only -p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert set Connection . inactivity_probe=180000
+        ovn-sbctl --no-leader-only $SSL_OPTIONS set-connection pssl:"${SB_PORT}":["${DB_ADDR}"]
+        ovn-sbctl --no-leader-only $SSL_OPTIONS set Connection . inactivity_probe=${PROBE_INTERVAL}
     else
-        if [[ ! "$NODE_IPS" =~ "$DB_CLUSTER_ADDR" ]]; then
+        if ! echo "$NODE_IPS" | tr ',' '\n' | grep '^'`echo "$DB_CLUSTER_ADDR" | sed 's/\./\\\./g'`'$'; then
             echo "ERROR! host ip $DB_CLUSTER_ADDR not in env NODE_IPS $NODE_IPS"
             exit 1
         fi
@@ -352,7 +404,8 @@ else
         result=$?
         set -eo pipefail
         if [[ ${result} -eq 1  &&  "$nb_leader_ip" == "${DB_CLUSTER_ADDR}" ]]; then
-            ovn_ctl_args="--ovn-nb-db-ssl-key=/var/run/tls/key \
+            ovn_ctl_args="$DEBUG_OPT
+                --ovn-nb-db-ssl-key=/var/run/tls/key \
                 --ovn-nb-db-ssl-cert=/var/run/tls/cert \
                 --ovn-nb-db-ssl-ca-cert=/var/run/tls/cacert \
                 --ovn-sb-db-ssl-key=/var/run/tls/key \
@@ -361,6 +414,10 @@ else
                 --ovn-northd-ssl-key=/var/run/tls/key \
                 --ovn-northd-ssl-cert=/var/run/tls/cert \
                 --ovn-northd-ssl-ca-cert=/var/run/tls/cacert \
+                --db-nb-cluster-local-proto=ssl \
+                --db-sb-cluster-local-proto=ssl \
+                --db-nb-cluster-remote-proto=ssl \
+                --db-sb-cluster-remote-proto=ssl \
                 --db-nb-cluster-local-addr=[$DB_CLUSTER_ADDR] \
                 --db-sb-cluster-local-addr=[$DB_CLUSTER_ADDR] \
                 --db-nb-addr=[$DB_ADDR] \
@@ -381,9 +438,9 @@ else
                 --remote=db:Local_Config,Config,connections \
                 /etc/ovn/ovnsb_local_config.db
             /usr/share/ovn/scripts/ovn-ctl $ovn_ctl_args \
-                --ovn-manage-ovsdb=no start_northd
-            ovn-nbctl --no-leader-only -p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert set NB_Global . options:northd_probe_interval=180000
-            ovn-nbctl --no-leader-only -p /var/run/tls/key -c /var/run/tls/cert -C /var/run/tls/cacert set NB_Global . options:use_logical_dp_groups=true
+                --ovn-manage-ovsdb=no --ovn-northd-n-threads="${OVN_NORTHD_N_THREADS}" start_northd
+            ovn-nbctl --no-leader-only $SSL_OPTIONS set NB_Global . options:northd_probe_interval=${PROBE_INTERVAL}
+            ovn-nbctl --no-leader-only $SSL_OPTIONS set NB_Global . options:use_logical_dp_groups=true
         else
             # get leader if cluster exists
             set +eo pipefail
@@ -409,7 +466,8 @@ else
                 done
             fi
             set -eo pipefail
-            ovn_ctl_args="--ovn-nb-db-ssl-key=/var/run/tls/key \
+            ovn_ctl_args="$DEBUG_OPT
+                --ovn-nb-db-ssl-key=/var/run/tls/key \
                 --ovn-nb-db-ssl-cert=/var/run/tls/cert \
                 --ovn-nb-db-ssl-ca-cert=/var/run/tls/cacert \
                 --ovn-sb-db-ssl-key=/var/run/tls/key \
@@ -418,6 +476,10 @@ else
                 --ovn-northd-ssl-key=/var/run/tls/key \
                 --ovn-northd-ssl-cert=/var/run/tls/cert \
                 --ovn-northd-ssl-ca-cert=/var/run/tls/cacert \
+                --db-nb-cluster-local-proto=ssl \
+                --db-sb-cluster-local-proto=ssl \
+                --db-nb-cluster-remote-proto=ssl \
+                --db-sb-cluster-remote-proto=ssl \
                 --db-nb-cluster-local-addr=[$DB_CLUSTER_ADDR] \
                 --db-sb-cluster-local-addr=[$DB_CLUSTER_ADDR] \
                 --db-nb-cluster-remote-addr=[$nb_leader_ip] \
@@ -443,8 +505,9 @@ else
                 start_sb_ovsdb -- \
                 --remote=db:Local_Config,Config,connections \
                 /etc/ovn/ovnsb_local_config.db
+            set_nb_version_compatibility
             /usr/share/ovn/scripts/ovn-ctl $ovn_ctl_args \
-                --ovn-manage-ovsdb=no start_northd
+                --ovn-manage-ovsdb=no --ovn-northd-n-threads="${OVN_NORTHD_N_THREADS}" start_northd
         fi
     fi
 fi
@@ -455,5 +518,4 @@ ovs-appctl -t /var/run/ovn/ovnnb_db.ctl ovsdb-server/memory-trim-on-compaction o
 ovs-appctl -t /var/run/ovn/ovnsb_db.ctl ovsdb-server/memory-trim-on-compaction on
 
 chmod 600 /etc/ovn/*
-/kube-ovn/kube-ovn-leader-checker
-
+/kube-ovn/kube-ovn-leader-checker --probeInterval=${OVN_LEADER_PROBE_INTERVAL} --enableCompact=${ENABLE_COMPACT}

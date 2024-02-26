@@ -50,20 +50,30 @@ type Configuration struct {
 	ServiceVswitchdFilePidPath      string
 	ServiceOvnControllerFileLogPath string
 	ServiceOvnControllerFilePidPath string
+	EnableVerboseConnCheck          bool
+	TCPConnCheckPort                int
+	UDPConnCheckPort                int
+	TargetIPPorts                   string
 }
 
 func ParseFlags() (*Configuration, error) {
 	var (
-		argPort               = pflag.Int("port", 8080, "metrics port")
+		argPort = pflag.Int("port", 8080, "metrics port")
+
+		argEnableVerboseConnCheck   = pflag.Bool("enable-verbose-conn-check", false, "enable TCP/UDP connectivity check")
+		argTCPConnectivityCheckPort = pflag.Int("tcp-conn-check-port", 8100, "TCP connectivity Check Port")
+		argUDPConnectivityCheckPort = pflag.Int("udp-conn-check-port", 8101, "UDP connectivity Check Port")
+
 		argKubeConfigFile     = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
 		argDaemonSetNameSpace = pflag.String("ds-namespace", "kube-system", "kube-ovn-pinger daemonset namespace")
 		argDaemonSetName      = pflag.String("ds-name", "kube-ovn-pinger", "kube-ovn-pinger daemonset name")
 		argInterval           = pflag.Int("interval", 5, "interval seconds between consecutive pings")
 		argMode               = pflag.String("mode", "server", "server or job Mode")
 		argExitCode           = pflag.Int("exit-code", 0, "exit code when failure happens")
-		argInternalDns        = pflag.String("internal-dns", "kubernetes.default", "check dns from pod")
-		argExternalDns        = pflag.String("external-dns", "", "check external dns resolve from pod")
-		argExternalAddress    = pflag.String("external-address", "", "check ping connection to an external address, default: 114.114.114.114")
+		argInternalDNS        = pflag.String("internal-dns", "kubernetes.default", "check dns from pod")
+		argExternalDNS        = pflag.String("external-dns", "", "check external dns resolve from pod")
+		argExternalAddress    = pflag.String("external-address", "", "check ping connection to an external address, default: 1.1.1.1")
+		argTargetIPPorts      = pflag.String("target-ip-ports", "", "target protocol ip and port, eg: 'tcp-169.254.1.1-8080,udp-169.254.2.2-8081'")
 		argNetworkMode        = pflag.String("network-mode", "kube-ovn", "The cni plugin current cluster used, default: kube-ovn")
 		argEnableMetrics      = pflag.Bool("enable-metrics", true, "Whether to support metrics query")
 
@@ -109,8 +119,8 @@ func ParseFlags() (*Configuration, error) {
 		Interval:           *argInterval,
 		Mode:               *argMode,
 		ExitCode:           *argExitCode,
-		InternalDNS:        *argInternalDns,
-		ExternalDNS:        *argExternalDns,
+		InternalDNS:        *argInternalDNS,
+		ExternalDNS:        *argExternalDNS,
 		PodIP:              os.Getenv("POD_IP"),
 		HostIP:             os.Getenv("HOST_IP"),
 		NodeName:           os.Getenv("NODE_NAME"),
@@ -118,6 +128,11 @@ func ParseFlags() (*Configuration, error) {
 		ExternalAddress:    *argExternalAddress,
 		NetworkMode:        *argNetworkMode,
 		EnableMetrics:      *argEnableMetrics,
+
+		EnableVerboseConnCheck: *argEnableVerboseConnCheck,
+		TCPConnCheckPort:       *argTCPConnectivityCheckPort,
+		UDPConnCheckPort:       *argUDPConnectivityCheckPort,
+		TargetIPPorts:          *argTargetIPPorts,
 
 		// OVS Monitor
 		PollTimeout:                     *argPollTimeout,

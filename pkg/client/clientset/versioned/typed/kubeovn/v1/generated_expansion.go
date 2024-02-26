@@ -20,6 +20,8 @@ package v1
 
 type IPExpansion interface{}
 
+type IPPoolExpansion interface{}
+
 type IptablesDnatRuleExpansion interface{}
 
 type IptablesEIPExpansion interface{}
@@ -28,6 +30,8 @@ type IptablesFIPRuleExpansion interface{}
 
 type IptablesSnatRuleExpansion interface{}
 
+type OvnDnatRuleExpansion interface{}
+
 type OvnEipExpansion interface{}
 
 type OvnFipExpansion interface{}
@@ -35,6 +39,8 @@ type OvnFipExpansion interface{}
 type OvnSnatRuleExpansion interface{}
 
 type ProviderNetworkExpansion interface{}
+
+type QoSPolicyExpansion interface{}
 
 type SecurityGroupExpansion interface{}
 

@@ -23,6 +23,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 
+	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
+	"github.com/kubeovn/kube-ovn/pkg/ovs"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
@@ -31,14 +33,20 @@ const (
 	EnvPodName           = "POD_NAME"
 	EnvPodNameSpace      = "POD_NAMESPACE"
 	OvnNorthdPid         = "/var/run/ovn/ovn-northd.pid"
-	DefaultProbeInterval = 15
+	DefaultProbeInterval = 5
+	OvnNorthdPort        = "6643"
+	MaxFailCount         = 3
 )
+
+var failCount int
 
 // Configuration is the controller conf
 type Configuration struct {
 	KubeConfigFile string
 	KubeClient     kubernetes.Interface
 	ProbeInterval  int
+	EnableCompact  bool
+	ISICDBServer   bool
 }
 
 // ParseFlags parses cmd args then init kubeclient and conf
@@ -47,6 +55,8 @@ func ParseFlags() (*Configuration, error) {
 	var (
 		argKubeConfigFile = pflag.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information. If not set use the inCluster token.")
 		argProbeInterval  = pflag.Int("probeInterval", DefaultProbeInterval, "interval of probing leader in seconds")
+		argEnableCompact  = pflag.Bool("enableCompact", true, "is enable compact")
+		argIsICDBServer   = pflag.Bool("isICDBServer", false, "is ic db server")
 	)
 
 	klogFlags := flag.NewFlagSet("klog", flag.ContinueOnError)
@@ -76,6 +86,8 @@ func ParseFlags() (*Configuration, error) {
 	config := &Configuration{
 		KubeConfigFile: *argKubeConfigFile,
 		ProbeInterval:  *argProbeInterval,
+		EnableCompact:  *argEnableCompact,
+		ISICDBServer:   *argIsICDBServer,
 	}
 	return config, nil
 }
@@ -172,9 +184,9 @@ func isDBLeader(dbName string, port int) bool {
 
 func checkNorthdActive() bool {
 	var command []string
-	file, err := os.OpenFile(OvnNorthdPid, os.O_RDWR, 0600)
+	file, err := os.OpenFile(OvnNorthdPid, os.O_RDWR, 0o600)
 	if err != nil {
-		klog.Errorf("failed to open %s err =  %v", OvnNorthdPid, err)
+		klog.Errorf("failed to open %s err = %v", OvnNorthdPid, err)
 		return false
 	}
 	fileByte, err := io.ReadAll(file)
@@ -205,6 +217,8 @@ func checkNorthdActive() bool {
 }
 
 func stealLock() {
+	podIP := os.Getenv("POD_IP")
+
 	var command []string
 	if os.Getenv(EnvSSL) == "false" {
 		command = []string{
@@ -212,7 +226,7 @@ func stealLock() {
 			"-t",
 			"1",
 			"steal",
-			"tcp:127.0.0.1:6642",
+			fmt.Sprintf("tcp:%s:6642", podIP),
 			"ovn_northd",
 		}
 	} else {
@@ -227,7 +241,7 @@ func stealLock() {
 			"-C",
 			"/var/run/tls/cacert",
 			"steal",
-			"ssl:127.0.0.1:6642",
+			fmt.Sprintf("ssl:%s:6642", podIP),
 			"ovn_northd",
 		}
 	}
@@ -252,6 +266,7 @@ func patchPodLabels(cfg *Configuration, cachedPod *corev1.Pod, labels map[string
 	pod.Labels = labels
 	patch, err := util.GenerateStrategicMergePatchPayload(cachedPod, pod)
 	if err != nil {
+		klog.Errorf("failed to generate patch payload, %v", err)
 		return err
 	}
 	_, err = cfg.KubeClient.CoreV1().Pods(pod.Namespace).Patch(context.Background(), pod.Name,
@@ -268,7 +283,24 @@ func checkNorthdSvcExist(cfg *Configuration, namespace, svcName string) bool {
 	return true
 }
 
-func checkNorthdSvcValidIP(cfg *Configuration, namespace, epName string) bool {
+func checkNorthdEpAvailable(ip string) bool {
+	address := net.JoinHostPort(ip, OvnNorthdPort)
+	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
+	if err != nil {
+		klog.Errorf("failed to connect to northd leader %s, err: %v", ip, err)
+		failCount++
+		if failCount >= MaxFailCount {
+			return false
+		}
+	} else {
+		failCount = 0
+		klog.V(5).Infof("succeed to connect to northd leader %s", ip)
+		_ = conn.Close()
+	}
+	return true
+}
+
+func checkNorthdEpAlive(cfg *Configuration, namespace, epName string) bool {
 	eps, err := cfg.KubeClient.CoreV1().Endpoints(namespace).Get(context.Background(), epName, metav1.GetOptions{})
 	if err != nil {
 		klog.Errorf("get ep %v namespace %v error %v", epName, namespace, err)
@@ -284,9 +316,9 @@ func checkNorthdSvcValidIP(cfg *Configuration, namespace, epName string) bool {
 		klog.V(5).Infof("epName %v has no address assigned", epName)
 		return false
 	}
-
 	klog.V(5).Infof("epName %v address assigned %+v", epName, eps.Subsets[0].Addresses[0].IP)
-	return true
+
+	return checkNorthdEpAvailable(eps.Subsets[0].Addresses[0].IP)
 }
 
 func updatePodLabels(labels map[string]string, key string, isLeader bool) {
@@ -298,7 +330,7 @@ func updatePodLabels(labels map[string]string, key string, isLeader bool) {
 }
 
 func compactOvnDatabase(db string) {
-	var command = []string{
+	command := []string{
 		"-t",
 		fmt.Sprintf("/var/run/ovn/ovn%s_db.ctl", db),
 		"ovsdb-server/compact",
@@ -313,11 +345,11 @@ func compactOvnDatabase(db string) {
 	}
 
 	if len(output) != 0 {
-		klog.V(5).Infof("compact ovn%s database: %s", string(output))
+		klog.V(5).Infof("compact ovn%s database: %s", db, string(output))
 	}
 }
 
-func doOvnLeaderCheck(cfg *Configuration, podName string, podNamespace string) {
+func doOvnLeaderCheck(cfg *Configuration, podName, podNamespace string) {
 	if podName == "" || podNamespace == "" {
 		util.LogFatalAndExit(nil, "env variables POD_NAME and POD_NAMESPACE must be set")
 	}
@@ -325,7 +357,7 @@ func doOvnLeaderCheck(cfg *Configuration, podName string, podNamespace string) {
 		util.LogFatalAndExit(nil, "preValidChkCfg: invalid cfg")
 	}
 
-	if !checkOvnIsAlive() {
+	if !cfg.ISICDBServer && !checkOvnIsAlive() {
 		klog.Errorf("ovn is not alive")
 		return
 	}
@@ -340,24 +372,46 @@ func doOvnLeaderCheck(cfg *Configuration, podName string, podNamespace string) {
 	for k, v := range cachedPod.Labels {
 		labels[k] = v
 	}
-	nbLeader := isDBLeader("OVN_Northbound", 6641)
-	sbLeader := isDBLeader("OVN_Southbound", 6642)
-	northdLeader := checkNorthdActive()
-	updatePodLabels(labels, "ovn-nb-leader", nbLeader)
-	updatePodLabels(labels, "ovn-sb-leader", sbLeader)
-	updatePodLabels(labels, "ovn-northd-leader", northdLeader)
-	if err = patchPodLabels(cfg, cachedPod, labels); err != nil {
-		klog.Errorf("patch label error %v", err)
-		return
-	}
-	if sbLeader && checkNorthdSvcExist(cfg, podNamespace, "ovn-northd") {
-		if !checkNorthdSvcValidIP(cfg, podNamespace, "ovn-northd") {
-			klog.Warning("no available northd leader, try to release the lock")
-			stealLock()
+
+	if !cfg.ISICDBServer {
+		nbLeader := isDBLeader("OVN_Northbound", 6641)
+		sbLeader := isDBLeader("OVN_Southbound", 6642)
+		northdLeader := checkNorthdActive()
+		updatePodLabels(labels, "ovn-nb-leader", nbLeader)
+		updatePodLabels(labels, "ovn-sb-leader", sbLeader)
+		updatePodLabels(labels, "ovn-northd-leader", northdLeader)
+		if err = patchPodLabels(cfg, cachedPod, labels); err != nil {
+			klog.Errorf("patch label error %v", err)
+			return
+		}
+		if sbLeader && checkNorthdSvcExist(cfg, podNamespace, "ovn-northd") {
+			if !checkNorthdEpAlive(cfg, podNamespace, "ovn-northd") {
+				klog.Warning("no available northd leader, try to release the lock")
+				stealLock()
+			}
+		}
+
+		if cfg.EnableCompact {
+			compactOvnDatabase("nb")
+			compactOvnDatabase("sb")
+		}
+	} else {
+		icNbLeader := isDBLeader("OVN_IC_Northbound", 6645)
+		icSbLeader := isDBLeader("OVN_IC_Southbound", 6646)
+		updatePodLabels(labels, "ovn-ic-nb-leader", icNbLeader)
+		updatePodLabels(labels, "ovn-ic-sb-leader", icSbLeader)
+		if err = patchPodLabels(cfg, cachedPod, labels); err != nil {
+			klog.Errorf("patch label error %v", err)
+			return
+		}
+
+		if icNbLeader {
+			if err := updateTS(); err != nil {
+				klog.Errorf("update ts num failed err: %v", err)
+				return
+			}
 		}
 	}
-	compactOvnDatabase("nb")
-	compactOvnDatabase("sb")
 }
 
 func StartOvnLeaderCheck(cfg *Configuration) {
@@ -368,4 +422,100 @@ func StartOvnLeaderCheck(cfg *Configuration) {
 		doOvnLeaderCheck(cfg, podName, podNamespace)
 		time.Sleep(interval)
 	}
+}
+
+func getTSName(index int) string {
+	if index == 0 {
+		return util.InterconnectionSwitch
+	}
+	return fmt.Sprintf("%s%d", util.InterconnectionSwitch, index)
+}
+
+func getTSCidr(index int) (string, error) {
+	var proto, cidr string
+	podIpsEnv := os.Getenv("POD_IPS")
+	podIps := strings.Split(podIpsEnv, ",")
+	if len(podIps) == 1 {
+		if util.CheckProtocol(podIps[0]) == kubeovnv1.ProtocolIPv6 {
+			proto = kubeovnv1.ProtocolIPv6
+		} else {
+			proto = kubeovnv1.ProtocolIPv4
+		}
+	} else if len(podIps) == 2 {
+		proto = kubeovnv1.ProtocolDual
+	}
+
+	switch proto {
+	case kubeovnv1.ProtocolIPv4:
+		cidr = fmt.Sprintf("169.254.%d.0/24", 100+index)
+	case kubeovnv1.ProtocolIPv6:
+		cidr = fmt.Sprintf("fe80:a9fe:%02x::/112", 100+index)
+	case kubeovnv1.ProtocolDual:
+		cidr = fmt.Sprintf("169.254.%d.0/24,fe80:a9fe:%02x::/112", 100+index, 100+index)
+	}
+	return cidr, nil
+}
+
+func updateTS() error {
+	cmd := exec.Command("ovn-ic-nbctl", "show")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ovn-ic-nbctl show output: %s, err: %v", output, err)
+	}
+	var existTSCount int
+	if lines := strings.TrimSpace(string(output)); lines != "" {
+		existTSCount = len(strings.Split(lines, "\n"))
+	}
+	expectTSCount, err := strconv.Atoi(os.Getenv("TS_NUM"))
+	if err != nil {
+		return fmt.Errorf("expectTSCount atoi failed output: %s, err: %v", output, err)
+	}
+	if expectTSCount == existTSCount {
+		klog.V(3).Infof("expectTSCount %d no changes required.", expectTSCount)
+		return nil
+	}
+
+	if expectTSCount > existTSCount {
+		for i := expectTSCount - 1; i > existTSCount-1; i-- {
+			tsName := getTSName(i)
+			subnet, err := getTSCidr(i)
+			if err != nil {
+				return err
+			}
+			cmd := exec.Command("ovn-ic-nbctl",
+				ovs.MayExist, "ts-add", tsName,
+				"--", "set", "Transit_Switch", tsName, fmt.Sprintf(`external_ids:subnet="%s"`, subnet))
+			if os.Getenv("ENABLE_SSL") == "true" {
+				cmd = exec.Command("ovn-ic-nbctl",
+					"--private-key=/var/run/tls/key",
+					"--certificate=/var/run/tls/cert",
+					"--ca-cert=/var/run/tls/cacert",
+					ovs.MayExist, "ts-add", tsName,
+					"--", "set", "Transit_Switch", tsName, fmt.Sprintf(`external_ids:subnet="%s"`, subnet))
+			}
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("output: %s, err: %v", output, err)
+			}
+		}
+	} else {
+		for i := existTSCount - 1; i >= expectTSCount; i-- {
+			tsName := getTSName(i)
+			cmd := exec.Command("ovn-ic-nbctl",
+				"ts-del", tsName)
+			if os.Getenv("ENABLE_SSL") == "true" {
+				cmd = exec.Command("ovn-ic-nbctl",
+					"--private-key=/var/run/tls/key",
+					"--certificate=/var/run/tls/cert",
+					"--ca-cert=/var/run/tls/cacert",
+					"ts-del", tsName)
+			}
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("output: %s, err: %v", output, err)
+			}
+		}
+	}
+
+	return nil
 }

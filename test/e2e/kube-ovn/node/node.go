@@ -3,13 +3,12 @@ package node
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientset "k8s.io/client-go/kubernetes"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -43,7 +42,7 @@ var _ = framework.OrderedDescribe("[group:node]", func() {
 		hostPodName = "pod-" + framework.RandomSuffix()
 		serviceName = "service-" + framework.RandomSuffix()
 		subnetName = "subnet-" + framework.RandomSuffix()
-		cidr = framework.RandomCIDR(f.ClusterIpFamily)
+		cidr = framework.RandomCIDR(f.ClusterIPFamily)
 
 		if image == "" {
 			image = framework.GetKubeOvnImage(cs)
@@ -68,7 +67,7 @@ var _ = framework.OrderedDescribe("[group:node]", func() {
 		join := subnetClient.Get("join")
 
 		ginkgo.By("Getting nodes")
-		nodeList, err := e2enode.GetReadySchedulableNodes(cs)
+		nodeList, err := e2enode.GetReadySchedulableNodes(context.Background(), cs)
 		framework.ExpectNoError(err)
 
 		ginkgo.By("Validating node annotations")
@@ -77,7 +76,7 @@ var _ = framework.OrderedDescribe("[group:node]", func() {
 			framework.ExpectUUID(node.Annotations[util.ChassisAnnotation])
 			framework.ExpectHaveKeyWithValue(node.Annotations, util.CidrAnnotation, join.Spec.CIDRBlock)
 			framework.ExpectHaveKeyWithValue(node.Annotations, util.GatewayAnnotation, join.Spec.Gateway)
-			framework.ExpectIPInCIDR(node.Annotations[util.IpAddressAnnotation], join.Spec.CIDRBlock)
+			framework.ExpectIPInCIDR(node.Annotations[util.IPAddressAnnotation], join.Spec.CIDRBlock)
 			framework.ExpectHaveKeyWithValue(node.Annotations, util.LogicalSwitchAnnotation, join.Name)
 			framework.ExpectMAC(node.Annotations[util.MacAddressAnnotation])
 			framework.ExpectHaveKeyWithValue(node.Annotations, util.PortNameAnnotation, "node-"+node.Name)
@@ -96,11 +95,13 @@ var _ = framework.OrderedDescribe("[group:node]", func() {
 			})
 			framework.ExpectNoError(err)
 			framework.ExpectHaveLen(links, 1)
-			framework.Logf(util.GetIpAddrWithMask(node.Annotations[util.IpAddressAnnotation], join.Spec.CIDRBlock))
-			ips := strings.Split(util.GetIpAddrWithMask(node.Annotations[util.IpAddressAnnotation], join.Spec.CIDRBlock), ",")
+			framework.Logf(util.GetIPAddrWithMask(node.Annotations[util.IPAddressAnnotation], join.Spec.CIDRBlock))
+			ipCIDRs, err := util.GetIPAddrWithMask(node.Annotations[util.IPAddressAnnotation], join.Spec.CIDRBlock)
+			framework.ExpectNoError(err)
+			ips := strings.Split(ipCIDRs, ",")
 			framework.ExpectConsistOf(links[0].NonLinkLocalAddresses(), ips)
 
-			err = podClient.Delete(context.Background(), podName, metav1.DeleteOptions{})
+			err = podClient.Delete(podName)
 			framework.ExpectNoError(err)
 		}
 	})
@@ -109,14 +110,14 @@ var _ = framework.OrderedDescribe("[group:node]", func() {
 		f.SkipVersionPriorTo(1, 12, "This feature was introduce in v1.12")
 
 		ginkgo.By("Creating subnet " + subnetName)
-		subnet = framework.MakeSubnet(subnetName, "", cidr, "", nil, nil, nil)
+		subnet = framework.MakeSubnet(subnetName, "", cidr, "", "", "", nil, nil, nil)
 		subnet = subnetClient.CreateSync(subnet)
 
 		ginkgo.By("Creating pod " + podName)
 		annotations := map[string]string{
 			util.LogicalSwitchAnnotation: subnetName,
 		}
-		port := strconv.Itoa(8000 + rand.Intn(1000))
+		port := strconv.Itoa(8000 + rand.IntN(1000))
 		args := []string{"netexec", "--http-port", port}
 		pod := framework.MakePod(namespaceName, podName, nil, annotations, framework.AgnhostImage, nil, args)
 		pod = podClient.CreateSync(pod)
@@ -149,7 +150,7 @@ var _ = framework.OrderedDescribe("[group:node]", func() {
 		f.SkipVersionPriorTo(1, 12, "This feature was introduce in v1.12")
 
 		ginkgo.By("Creating subnet " + subnetName)
-		subnet = framework.MakeSubnet(subnetName, "", cidr, "", nil, nil, nil)
+		subnet = framework.MakeSubnet(subnetName, "", cidr, "", "", "", nil, nil, nil)
 		subnet = subnetClient.CreateSync(subnet)
 
 		ginkgo.By("Creating pod " + podName)
@@ -157,8 +158,8 @@ var _ = framework.OrderedDescribe("[group:node]", func() {
 		annotations := map[string]string{
 			util.LogicalSwitchAnnotation: subnetName,
 		}
-		port := 8000 + rand.Intn(1000)
-		portStr := strconv.Itoa(port)
+		port := 8000 + rand.Int32N(1000)
+		portStr := strconv.Itoa(int(port))
 		args := []string{"netexec", "--http-port", portStr}
 		pod := framework.MakePod(namespaceName, podName, podLabels, annotations, framework.AgnhostImage, nil, args)
 		_ = podClient.CreateSync(pod)
@@ -167,12 +168,10 @@ var _ = framework.OrderedDescribe("[group:node]", func() {
 		ports := []corev1.ServicePort{{
 			Name:       "tcp",
 			Protocol:   corev1.ProtocolTCP,
-			Port:       int32(port),
-			TargetPort: intstr.FromInt(port),
+			Port:       port,
+			TargetPort: intstr.FromInt32(port),
 		}}
 		service := framework.MakeService(serviceName, "", nil, podLabels, ports, "")
-		service.Spec.IPFamilyPolicy = new(corev1.IPFamilyPolicy)
-		*service.Spec.IPFamilyPolicy = corev1.IPFamilyPolicyPreferDualStack
 		_ = serviceClient.CreateSync(service, func(s *corev1.Service) (bool, error) {
 			return len(s.Spec.ClusterIPs) != 0, nil
 		}, "cluster ips are not empty")

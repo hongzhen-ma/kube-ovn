@@ -1,13 +1,13 @@
 package qos
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
 
 	"github.com/onsi/ginkgo/v2"
@@ -50,7 +50,7 @@ func waitOvsQosForPod(f *framework.Framework, table string, pod *corev1.Pod, exp
 	cmd := fmt.Sprintf(`ovs-vsctl --no-heading --columns=other_config --bare find %s external_ids:pod="%s/%s"`, table, pod.Namespace, pod.Name)
 
 	var config map[string]string
-	err := wait.PollImmediate(2*time.Second, 2*time.Minute, func() (bool, error) {
+	framework.WaitUntil(2*time.Second, 2*time.Minute, func(_ context.Context) (bool, error) {
 		output, err := e2epodoutput.RunHostCmd(ovsPod.Namespace, ovsPod.Name, cmd)
 		if err != nil {
 			return false, err
@@ -67,8 +67,7 @@ func waitOvsQosForPod(f *framework.Framework, table string, pod *corev1.Pod, exp
 
 		config = kvs
 		return true, nil
-	})
-	framework.ExpectNoError(err, "timed out getting ovs %s config for pod %s/%s", table, pod.Namespace, pod.Name)
+	}, "")
 
 	return config
 }
@@ -76,27 +75,23 @@ func waitOvsQosForPod(f *framework.Framework, table string, pod *corev1.Pod, exp
 var _ = framework.Describe("[group:qos]", func() {
 	f := framework.NewDefaultFramework("qos")
 
-	var subnetName, namespaceName string
+	var podName, namespaceName string
 	var podClient *framework.PodClient
-	var subnetClient *framework.SubnetClient
 
 	ginkgo.BeforeEach(func() {
 		podClient = f.PodClient()
-		subnetClient = f.SubnetClient()
 		namespaceName = f.Namespace.Name
+		podName = "pod-" + framework.RandomSuffix()
 	})
 	ginkgo.AfterEach(func() {
-		if subnetName != "" {
-			ginkgo.By("Deleting subnet " + subnetName)
-			subnetClient.DeleteSync(subnetName)
-		}
+		ginkgo.By("Deleting pod " + podName)
+		podClient.DeleteSync(podName)
 	})
 
 	framework.ConformanceIt("should support netem QoS", func() {
 		f.SkipVersionPriorTo(1, 9, "Support for netem QoS was introduced in v1.9")
 
-		name := "pod-" + framework.RandomSuffix()
-		ginkgo.By("Creating pod " + name)
+		ginkgo.By("Creating pod " + podName)
 		latency, jitter, limit, loss := 600, 400, 2000, 10
 		annotations := map[string]string{
 			util.NetemQosLatencyAnnotation: strconv.Itoa(latency),
@@ -106,7 +101,7 @@ var _ = framework.Describe("[group:qos]", func() {
 		if !f.VersionPriorTo(1, 12) {
 			annotations[util.NetemQosJitterAnnotation] = strconv.Itoa(jitter)
 		}
-		pod := framework.MakePod(namespaceName, name, nil, annotations, "", nil, nil)
+		pod := framework.MakePod(namespaceName, podName, nil, annotations, "", nil, nil)
 		pod = podClient.CreateSync(pod)
 
 		ginkgo.By("Validating pod annotations")
@@ -127,17 +122,13 @@ var _ = framework.Describe("[group:qos]", func() {
 		}
 		framework.ExpectHaveKeyWithValue(qos, "limit", strconv.Itoa(limit))
 		framework.ExpectHaveKeyWithValue(qos, "loss", strconv.Itoa(loss))
-
-		ginkgo.By("Deleting pod " + name)
-		podClient.DeleteSync(pod.Name)
 	})
 
 	framework.ConformanceIt("should be able to update netem QoS", func() {
 		f.SkipVersionPriorTo(1, 9, "Support for netem QoS was introduced in v1.9")
 
-		name := "pod-" + framework.RandomSuffix()
-		ginkgo.By("Creating pod " + name + " without QoS")
-		pod := framework.MakePod(namespaceName, name, nil, nil, "", nil, nil)
+		ginkgo.By("Creating pod " + podName + " without QoS")
+		pod := framework.MakePod(namespaceName, podName, nil, nil, "", nil, nil)
 		pod = podClient.CreateSync(pod)
 
 		ginkgo.By("Validating pod annotations")
@@ -157,7 +148,7 @@ var _ = framework.Describe("[group:qos]", func() {
 		}
 		modifiedPod.Annotations[util.NetemQosLimitAnnotation] = strconv.Itoa(limit)
 		modifiedPod.Annotations[util.NetemQosLossAnnotation] = strconv.Itoa(loss)
-		pod = podClient.PatchPod(pod, modifiedPod)
+		pod = podClient.Patch(pod, modifiedPod)
 
 		ginkgo.By("Validating pod annotations")
 		framework.ExpectHaveKeyWithValue(pod.Annotations, util.AllocatedAnnotation, "true")
@@ -177,21 +168,17 @@ var _ = framework.Describe("[group:qos]", func() {
 		}
 		framework.ExpectHaveKeyWithValue(qos, "limit", strconv.Itoa(limit))
 		framework.ExpectHaveKeyWithValue(qos, "loss", strconv.Itoa(loss))
-
-		ginkgo.By("Deleting pod " + name)
-		podClient.DeleteSync(pod.Name)
 	})
 
 	framework.ConformanceIt("should support htb QoS", func() {
 		f.SkipVersionPriorTo(1, 9, "Support for htb QoS with priority was introduced in v1.9")
 
-		name := "pod-" + framework.RandomSuffix()
-		ginkgo.By("Creating pod " + name)
+		ginkgo.By("Creating pod " + podName)
 		ingressRate := 300
 		annotations := map[string]string{
 			util.IngressRateAnnotation: strconv.Itoa(ingressRate),
 		}
-		pod := framework.MakePod(namespaceName, name, nil, annotations, "", nil, nil)
+		pod := framework.MakePod(namespaceName, podName, nil, annotations, "", nil, nil)
 		pod = podClient.CreateSync(pod)
 
 		ginkgo.By("Validating pod annotations")
@@ -202,8 +189,5 @@ var _ = framework.Describe("[group:qos]", func() {
 		ginkgo.By("Validating OVS Queue")
 		queue := getOvsQosForPod(f, "queue", pod)
 		framework.ExpectHaveKeyWithValue(queue, "max-rate", strconv.Itoa(ingressRate*1000*1000))
-
-		ginkgo.By("Deleting pod " + name)
-		podClient.DeleteSync(pod.Name)
 	})
 })

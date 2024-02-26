@@ -1,7 +1,9 @@
 package ovs
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -102,12 +104,12 @@ func Test_aclMatch_Match(t *testing.T) {
 	t.Run("generate rule like 'ip4.src == $test.allow.as'", func(t *testing.T) {
 		t.Parallel()
 
-		match := NewAclMatch("ip4.dst", "==", "$test.allow.as", "")
+		match := NewACLMatch("ip4.dst", "==", "$test.allow.as", "")
 		rule, err := match.Match()
 		require.NoError(t, err)
 		require.Equal(t, "ip4.dst == $test.allow.as", rule)
 
-		match = NewAclMatch("ip4.dst", "!=", "$test.allow.as", "")
+		match = NewACLMatch("ip4.dst", "!=", "$test.allow.as", "")
 		rule, err = match.Match()
 		require.NoError(t, err)
 		require.Equal(t, "ip4.dst != $test.allow.as", rule)
@@ -116,7 +118,7 @@ func Test_aclMatch_Match(t *testing.T) {
 	t.Run("generate acl match rule like 'ip'", func(t *testing.T) {
 		t.Parallel()
 
-		match := NewAclMatch("ip", "==", "", "")
+		match := NewACLMatch("ip", "==", "", "")
 
 		rule, err := match.Match()
 		require.NoError(t, err)
@@ -126,7 +128,7 @@ func Test_aclMatch_Match(t *testing.T) {
 	t.Run("generate rule like '12345 <= tcp.dst <= 12500'", func(t *testing.T) {
 		t.Parallel()
 
-		match := NewAclMatch("tcp.dst", "<=", "12345", "12500")
+		match := NewACLMatch("tcp.dst", "<=", "12345", "12500")
 		rule, err := match.Match()
 		require.NoError(t, err)
 		require.Equal(t, "12345 <= tcp.dst <= 12500", rule)
@@ -135,8 +137,8 @@ func Test_aclMatch_Match(t *testing.T) {
 	t.Run("err occurred when key is empty", func(t *testing.T) {
 		t.Parallel()
 
-		match := NewAndAclMatch(
-			NewAclMatch("", "", "", ""),
+		match := NewAndACLMatch(
+			NewACLMatch("", "", "", ""),
 		)
 
 		_, err := match.Match()
@@ -151,12 +153,12 @@ func Test_AndAclMatch_Match(t *testing.T) {
 		t.Parallel()
 
 		/* match several tcp port traffic */
-		match := NewAndAclMatch(
-			NewAclMatch("inport", "==", "@ovn.sg.test_sg", ""),
-			NewAclMatch("ip", "", "", ""),
-			NewAclMatch("ip4.dst", "==", "$test.allow.as", ""),
-			NewAclMatch("ip4.dst", "!=", "$test.except.as", ""),
-			NewAclMatch("tcp.dst", "<=", "12345", "12500"),
+		match := NewAndACLMatch(
+			NewACLMatch("inport", "==", "@ovn.sg.test_sg", ""),
+			NewACLMatch("ip", "", "", ""),
+			NewACLMatch("ip4.dst", "==", "$test.allow.as", ""),
+			NewACLMatch("ip4.dst", "!=", "$test.except.as", ""),
+			NewACLMatch("tcp.dst", "<=", "12345", "12500"),
 		)
 
 		rule, err := match.Match()
@@ -167,8 +169,8 @@ func Test_AndAclMatch_Match(t *testing.T) {
 	t.Run("err occurred when key is empty", func(t *testing.T) {
 		t.Parallel()
 
-		match := NewAndAclMatch(
-			NewAclMatch("", "", "", ""),
+		match := NewAndACLMatch(
+			NewACLMatch("", "", "", ""),
 		)
 
 		_, err := match.Match()
@@ -183,14 +185,14 @@ func Test_OrAclMatch_Match(t *testing.T) {
 		t.Parallel()
 
 		/* match several tcp port traffic */
-		match := NewOrAclMatch(
-			NewAndAclMatch(
-				NewAclMatch("ip4.src", "==", "10.250.0.0/16", ""),
+		match := NewOrACLMatch(
+			NewAndACLMatch(
+				NewACLMatch("ip4.src", "==", "10.250.0.0/16", ""),
 			),
-			NewAndAclMatch(
-				NewAclMatch("ip4.src", "==", "10.244.0.0/16", ""),
+			NewAndACLMatch(
+				NewACLMatch("ip4.src", "==", "10.244.0.0/16", ""),
 			),
-			NewAclMatch("ip4.src", "==", "10.260.0.0/16", ""),
+			NewACLMatch("ip4.src", "==", "10.260.0.0/16", ""),
 		)
 
 		rule, err := match.Match()
@@ -202,14 +204,14 @@ func Test_OrAclMatch_Match(t *testing.T) {
 		t.Parallel()
 
 		/* match several tcp port traffic */
-		match := NewOrAclMatch(
-			NewAndAclMatch(
-				NewAclMatch("ip4.src", "==", "10.250.0.0/16", ""),
-				NewAclMatch("ip4.dst", "==", "10.244.0.0/16", ""),
+		match := NewOrACLMatch(
+			NewAndACLMatch(
+				NewACLMatch("ip4.src", "==", "10.250.0.0/16", ""),
+				NewACLMatch("ip4.dst", "==", "10.244.0.0/16", ""),
 			),
-			NewAndAclMatch(
-				NewAclMatch("ip4.src", "==", "10.244.0.0/16", ""),
-				NewAclMatch("ip4.dst", "==", "10.250.0.0/16", ""),
+			NewAndACLMatch(
+				NewACLMatch("ip4.src", "==", "10.244.0.0/16", ""),
+				NewACLMatch("ip4.dst", "==", "10.250.0.0/16", ""),
 			),
 		)
 
@@ -221,11 +223,100 @@ func Test_OrAclMatch_Match(t *testing.T) {
 	t.Run("err occurred when key is empty", func(t *testing.T) {
 		t.Parallel()
 
-		match := NewAndAclMatch(
-			NewAclMatch("", "", "", ""),
+		match := NewAndACLMatch(
+			NewACLMatch("", "", "", ""),
 		)
 
 		_, err := match.Match()
 		require.ErrorContains(t, err, "acl rule key is required")
+	})
+}
+
+func Test_Limiter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("without limit", func(t *testing.T) {
+		t.Parallel()
+
+		var (
+			limiter *Limiter
+			err     error
+		)
+
+		limiter = new(Limiter)
+
+		err = limiter.Wait(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, int32(1), limiter.Current())
+
+		err = limiter.Wait(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, int32(2), limiter.Current())
+
+		limiter.Done()
+		require.Equal(t, int32(1), limiter.Current())
+
+		limiter.Done()
+		require.Equal(t, int32(0), limiter.Current())
+	})
+
+	t.Run("with limit", func(t *testing.T) {
+		t.Parallel()
+
+		var (
+			limiter *Limiter
+			err     error
+		)
+
+		limiter = new(Limiter)
+		limiter.Update(2)
+
+		err = limiter.Wait(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, int32(1), limiter.Current())
+
+		err = limiter.Wait(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, int32(2), limiter.Current())
+
+		time.AfterFunc(10*time.Second, func() {
+			limiter.Done()
+			require.Equal(t, int32(1), limiter.Current())
+		})
+
+		err = limiter.Wait(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, int32(2), limiter.Current())
+	})
+
+	t.Run("with timeout", func(t *testing.T) {
+		t.Parallel()
+
+		var (
+			limiter *Limiter
+			err     error
+		)
+
+		limiter = new(Limiter)
+		limiter.Update(2)
+
+		err = limiter.Wait(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, int32(1), limiter.Current())
+
+		err = limiter.Wait(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, int32(2), limiter.Current())
+
+		time.AfterFunc(10*time.Second, func() {
+			limiter.Done()
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		err = limiter.Wait(ctx)
+		require.ErrorContains(t, err, "context canceled by timeout")
+		require.Equal(t, int32(2), limiter.Current())
 	})
 }

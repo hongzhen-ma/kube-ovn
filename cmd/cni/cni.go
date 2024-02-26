@@ -1,4 +1,4 @@
-package cni
+package main
 
 import (
 	"encoding/json"
@@ -18,7 +18,7 @@ import (
 	"github.com/kubeovn/kube-ovn/versions"
 )
 
-func CmdMain() {
+func main() {
 	// this ensures that main runs only on main thread (thread group leader).
 	// since namespace ops (unshare, setns) are done for a single thread, we
 	// must ensure that the goroutine does not jump from OS thread to thread
@@ -47,19 +47,20 @@ func cmdAdd(args *skel.CmdArgs) error {
 
 	client := request.NewCniServerClient(netConf.ServerSocket)
 	response, err := client.Add(request.CniRequest{
-		CniType:                   netConf.Type,
-		PodName:                   podName,
-		PodNamespace:              podNamespace,
-		ContainerID:               args.ContainerID,
-		NetNs:                     args.Netns,
-		IfName:                    args.IfName,
-		Provider:                  netConf.Provider,
-		Routes:                    netConf.Routes,
-		DNS:                       netConf.DNS,
-		DeviceID:                  netConf.DeviceID,
-		VfDriver:                  netConf.VfDriver,
-		VhostUserSocketVolumeName: netConf.VhostUserSocketVolumeName,
-		VhostUserSocketName:       netConf.VhostUserSocketName,
+		CniType:                    netConf.Type,
+		PodName:                    podName,
+		PodNamespace:               podNamespace,
+		ContainerID:                args.ContainerID,
+		NetNs:                      args.Netns,
+		IfName:                     args.IfName,
+		Provider:                   netConf.Provider,
+		Routes:                     netConf.Routes,
+		DNS:                        netConf.DNS,
+		DeviceID:                   netConf.DeviceID,
+		VfDriver:                   netConf.VfDriver,
+		VhostUserSocketVolumeName:  netConf.VhostUserSocketVolumeName,
+		VhostUserSocketName:        netConf.VhostUserSocketName,
+		VhostUserSocketConsumption: netConf.VhostUserSocketConsumption,
 	})
 	if err != nil {
 		return types.NewError(types.ErrTryAgainLater, "RPC failed", err.Error())
@@ -82,14 +83,14 @@ func generateCNIResult(cniResponse *request.CniResponse, netns string) current.R
 	}
 	switch cniResponse.Protocol {
 	case kubeovnv1.ProtocolIPv4:
-		ip, route := assignV4Address(cniResponse.IpAddress, cniResponse.Gateway, mask)
+		ip, route := assignV4Address(cniResponse.IPAddress, cniResponse.Gateway, mask)
 		result.IPs = []*current.IPConfig{ip}
 		if route != nil {
 			result.Routes = []*types.Route{route}
 		}
 		result.Interfaces = []*current.Interface{&podIface}
 	case kubeovnv1.ProtocolIPv6:
-		ip, route := assignV6Address(cniResponse.IpAddress, cniResponse.Gateway, mask)
+		ip, route := assignV6Address(cniResponse.IPAddress, cniResponse.Gateway, mask)
 		result.IPs = []*current.IPConfig{ip}
 		if route != nil {
 			result.Routes = []*types.Route{route}
@@ -102,7 +103,7 @@ func generateCNIResult(cniResponse *request.CniResponse, netns string) current.R
 			_, netMask, _ = net.ParseCIDR(cidrBlock)
 			gwStr = ""
 			if util.CheckProtocol(cidrBlock) == kubeovnv1.ProtocolIPv4 {
-				ipStr := strings.Split(cniResponse.IpAddress, ",")[0]
+				ipStr := strings.Split(cniResponse.IPAddress, ",")[0]
 				if cniResponse.Gateway != "" {
 					gwStr = strings.Split(cniResponse.Gateway, ",")[0]
 				}
@@ -113,7 +114,7 @@ func generateCNIResult(cniResponse *request.CniResponse, netns string) current.R
 					result.Routes = append(result.Routes, route)
 				}
 			} else if util.CheckProtocol(cidrBlock) == kubeovnv1.ProtocolIPv6 {
-				ipStr := strings.Split(cniResponse.IpAddress, ",")[1]
+				ipStr := strings.Split(cniResponse.IPAddress, ",")[1]
 				if cniResponse.Gateway != "" {
 					gwStr = strings.Split(cniResponse.Gateway, ",")[1]
 				}
@@ -146,20 +147,21 @@ func cmdDel(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-	if netConf.Type == util.CniTypeName && args.IfName == "eth0" {
+	if netConf.Provider == "" && netConf.Type == util.CniTypeName && args.IfName == "eth0" {
 		netConf.Provider = util.OvnProvider
 	}
 
 	err = client.Del(request.CniRequest{
-		CniType:                   netConf.Type,
-		PodName:                   podName,
-		PodNamespace:              podNamespace,
-		ContainerID:               args.ContainerID,
-		NetNs:                     args.Netns,
-		IfName:                    args.IfName,
-		Provider:                  netConf.Provider,
-		DeviceID:                  netConf.DeviceID,
-		VhostUserSocketVolumeName: netConf.VhostUserSocketVolumeName,
+		CniType:                    netConf.Type,
+		PodName:                    podName,
+		PodNamespace:               podNamespace,
+		ContainerID:                args.ContainerID,
+		NetNs:                      args.Netns,
+		IfName:                     args.IfName,
+		Provider:                   netConf.Provider,
+		DeviceID:                   netConf.DeviceID,
+		VhostUserSocketVolumeName:  netConf.VhostUserSocketVolumeName,
+		VhostUserSocketConsumption: netConf.VhostUserSocketConsumption,
 	})
 	if err != nil {
 		return types.NewError(types.ErrTryAgainLater, "RPC failed", err.Error())

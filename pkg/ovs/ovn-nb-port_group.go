@@ -7,14 +7,16 @@ import (
 	"github.com/ovn-org/libovsdb/client"
 	"github.com/ovn-org/libovsdb/model"
 	"github.com/ovn-org/libovsdb/ovsdb"
+	"github.com/scylladb/go-set/strset"
 	"k8s.io/klog/v2"
 
 	"github.com/kubeovn/kube-ovn/pkg/ovsdb/ovnnb"
 )
 
-func (c *ovnClient) CreatePortGroup(pgName string, externalIDs map[string]string) error {
+func (c *OVNNbClient) CreatePortGroup(pgName string, externalIDs map[string]string) error {
 	exist, err := c.PortGroupExists(pgName)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 
@@ -28,7 +30,7 @@ func (c *ovnClient) CreatePortGroup(pgName string, externalIDs map[string]string
 		ExternalIDs: externalIDs,
 	}
 
-	ops, err := c.ovnNbClient.Create(pg)
+	ops, err := c.ovsDbClient.Create(pg)
 	if err != nil {
 		return fmt.Errorf("generate operations for creating port group %s: %v", pgName, err)
 	}
@@ -41,39 +43,55 @@ func (c *ovnClient) CreatePortGroup(pgName string, externalIDs map[string]string
 }
 
 // PortGroupAddPorts add ports to port group
-func (c *ovnClient) PortGroupAddPorts(pgName string, lspNames ...string) error {
+func (c *OVNNbClient) PortGroupAddPorts(pgName string, lspNames ...string) error {
 	return c.PortGroupUpdatePorts(pgName, ovsdb.MutateOperationInsert, lspNames...)
 }
 
 // PortGroupRemovePorts remove ports from port group
-func (c *ovnClient) PortGroupRemovePorts(pgName string, lspNames ...string) error {
+func (c *OVNNbClient) PortGroupRemovePorts(pgName string, lspNames ...string) error {
 	return c.PortGroupUpdatePorts(pgName, ovsdb.MutateOperationDelete, lspNames...)
 }
 
-// PortGroupResetPorts remove all ports from port group
-func (c *ovnClient) PortGroupResetPorts(pgName string) error {
-	pg, err := c.GetPortGroup(pgName, true)
+func (c *OVNNbClient) PortGroupSetPorts(pgName string, ports []string) error {
+	pg, err := c.GetPortGroup(pgName, false)
 	if err != nil {
 		return fmt.Errorf("get port group %s: %v", pgName, err)
 	}
 
-	// not found, skip
-	if pg == nil {
-		return nil
+	expected := strset.NewWithSize(len(ports))
+	for _, port := range ports {
+		lsp, err := c.GetLogicalSwitchPort(port, true)
+		if err != nil {
+			klog.Error(err)
+			return err
+		}
+		if lsp != nil {
+			expected.Add(lsp.UUID)
+		}
 	}
 
-	// clear ports
-	pg.Ports = nil
+	existing := strset.New(pg.Ports...)
+	toAdd := strset.Difference(expected, existing).List()
+	toDel := strset.Difference(existing, expected).List()
 
-	if err := c.UpdatePortGroup(pg, &pg.Ports); err != nil {
-		return fmt.Errorf("reset port group %s ports: %v", pgName, err)
+	insertOps, err := c.portGroupUpdatePortOp(pgName, toAdd, ovsdb.MutateOperationInsert)
+	if err != nil {
+		return fmt.Errorf("failed generate operations for adding ports %v to port group %s: %v", toAdd, pgName, err)
+	}
+	deleteOps, err := c.portGroupUpdatePortOp(pgName, toDel, ovsdb.MutateOperationDelete)
+	if err != nil {
+		return fmt.Errorf("failed generate operations for deleting ports %v from port group %s: %v", toDel, pgName, err)
+	}
+
+	if err = c.Transact("pg-ports-update", append(insertOps, deleteOps...)); err != nil {
+		return fmt.Errorf("port group %s set ports %v: %v", pgName, ports, err)
 	}
 
 	return nil
 }
 
 // UpdatePortGroup update port group
-func (c *ovnClient) UpdatePortGroup(pg *ovnnb.PortGroup, fields ...interface{}) error {
+func (c *OVNNbClient) UpdatePortGroup(pg *ovnnb.PortGroup, fields ...interface{}) error {
 	op, err := c.Where(pg).Update(pg, fields...)
 	if err != nil {
 		return fmt.Errorf("generate operations for updating port group %s: %v", pg.Name, err)
@@ -87,7 +105,7 @@ func (c *ovnClient) UpdatePortGroup(pg *ovnnb.PortGroup, fields ...interface{}) 
 }
 
 // PortGroupUpdatePorts add several ports to or from port group once
-func (c *ovnClient) PortGroupUpdatePorts(pgName string, op ovsdb.Mutator, lspNames ...string) error {
+func (c *OVNNbClient) PortGroupUpdatePorts(pgName string, op ovsdb.Mutator, lspNames ...string) error {
 	if len(lspNames) == 0 {
 		return nil
 	}
@@ -97,6 +115,7 @@ func (c *ovnClient) PortGroupUpdatePorts(pgName string, op ovsdb.Mutator, lspNam
 	for _, lspName := range lspNames {
 		lsp, err := c.GetLogicalSwitchPort(lspName, true)
 		if err != nil {
+			klog.Error(err)
 			return err
 		}
 
@@ -118,7 +137,7 @@ func (c *ovnClient) PortGroupUpdatePorts(pgName string, op ovsdb.Mutator, lspNam
 	return nil
 }
 
-func (c *ovnClient) DeletePortGroup(pgName string) error {
+func (c *OVNNbClient) DeletePortGroup(pgName string) error {
 	pg, err := c.GetPortGroup(pgName, true)
 	if err != nil {
 		return fmt.Errorf("get port group %s when delete: %v", pgName, err)
@@ -131,6 +150,7 @@ func (c *ovnClient) DeletePortGroup(pgName string) error {
 
 	op, err := c.Where(pg).Delete()
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 
@@ -142,12 +162,12 @@ func (c *ovnClient) DeletePortGroup(pgName string) error {
 }
 
 // GetPortGroup get port group by name
-func (c *ovnClient) GetPortGroup(pgName string, ignoreNotFound bool) (*ovnnb.PortGroup, error) {
+func (c *OVNNbClient) GetPortGroup(pgName string, ignoreNotFound bool) (*ovnnb.PortGroup, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
 	pg := &ovnnb.PortGroup{Name: pgName}
-	if err := c.ovnNbClient.Get(ctx, pg); err != nil {
+	if err := c.ovsDbClient.Get(ctx, pg); err != nil {
 		if ignoreNotFound && err == client.ErrNotFound {
 			return nil, nil
 		}
@@ -160,7 +180,7 @@ func (c *ovnClient) GetPortGroup(pgName string, ignoreNotFound bool) (*ovnnb.Por
 // ListPortGroups list port groups which match the given externalIDs,
 // result should include all port groups when externalIDs is empty,
 // result should include all port groups which externalIDs[key] is not empty when externalIDs[key] is ""
-func (c *ovnClient) ListPortGroups(externalIDs map[string]string) ([]ovnnb.PortGroup, error) {
+func (c *OVNNbClient) ListPortGroups(externalIDs map[string]string) ([]ovnnb.PortGroup, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
@@ -184,7 +204,6 @@ func (c *ovnClient) ListPortGroups(externalIDs map[string]string) ([]ovnnb.PortG
 						return false
 					}
 				}
-
 			}
 		}
 
@@ -197,13 +216,13 @@ func (c *ovnClient) ListPortGroups(externalIDs map[string]string) ([]ovnnb.PortG
 	return pgs, nil
 }
 
-func (c *ovnClient) PortGroupExists(pgName string) (bool, error) {
+func (c *OVNNbClient) PortGroupExists(pgName string) (bool, error) {
 	lsp, err := c.GetPortGroup(pgName, true)
 	return lsp != nil, err
 }
 
 // portGroupUpdatePortOp create operations add port to or delete port from port group
-func (c *ovnClient) portGroupUpdatePortOp(pgName string, lspUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) portGroupUpdatePortOp(pgName string, lspUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
 	if len(lspUUIDs) == 0 {
 		return nil, nil
 	}
@@ -221,8 +240,8 @@ func (c *ovnClient) portGroupUpdatePortOp(pgName string, lspUUIDs []string, op o
 	return c.portGroupOp(pgName, mutation)
 }
 
-// portGroupUpdatePortOp create operations add acl to or delete acl from port group
-func (c *ovnClient) portGroupUpdateAclOp(pgName string, aclUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
+// portGroupUpdateACLOp create operations add acl to or delete acl from port group
+func (c *OVNNbClient) portGroupUpdateACLOp(pgName string, aclUUIDs []string, op ovsdb.Mutator) ([]ovsdb.Operation, error) {
 	if len(aclUUIDs) == 0 {
 		return nil, nil
 	}
@@ -241,7 +260,7 @@ func (c *ovnClient) portGroupUpdateAclOp(pgName string, aclUUIDs []string, op ov
 }
 
 // portGroupOp create operations about port group
-func (c *ovnClient) portGroupOp(pgName string, mutationsFunc ...func(pg *ovnnb.PortGroup) *model.Mutation) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) portGroupOp(pgName string, mutationsFunc ...func(pg *ovnnb.PortGroup) *model.Mutation) ([]ovsdb.Operation, error) {
 	pg, err := c.GetPortGroup(pgName, false)
 	if err != nil {
 		return nil, fmt.Errorf("get port group %s: %v", pgName, err)
@@ -261,7 +280,7 @@ func (c *ovnClient) portGroupOp(pgName string, mutationsFunc ...func(pg *ovnnb.P
 		}
 	}
 
-	ops, err := c.ovnNbClient.Where(pg).Mutate(pg, mutations...)
+	ops, err := c.ovsDbClient.Where(pg).Mutate(pg, mutations...)
 	if err != nil {
 		return nil, fmt.Errorf("generate operations for mutating port group %s: %v", pgName, err)
 	}

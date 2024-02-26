@@ -34,14 +34,15 @@ type CniRequest struct {
 	DeviceID string `json:"deviceID"`
 	// dpdk
 	// empty dir volume for sharing vhost user unix socket
-	VhostUserSocketVolumeName string `json:"vhost_user_socket_volume_name"`
-	VhostUserSocketName       string `json:"vhost_user_socket_name"`
+	VhostUserSocketVolumeName  string `json:"vhost_user_socket_volume_name"`
+	VhostUserSocketName        string `json:"vhost_user_socket_name"`
+	VhostUserSocketConsumption string `json:"vhost_user_socket_consumption"`
 }
 
 // CniResponse is the cniserver response format
 type CniResponse struct {
 	Protocol   string    `json:"protocol"`
-	IpAddress  string    `json:"address"`
+	IPAddress  string    `json:"address"`
 	MacAddress string    `json:"mac_address"`
 	CIDR       string    `json:"cidr"`
 	Gateway    string    `json:"gateway"`

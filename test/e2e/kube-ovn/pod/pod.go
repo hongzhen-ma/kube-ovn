@@ -32,13 +32,13 @@ var _ = framework.Describe("[group:pod]", func() {
 		namespaceName = f.Namespace.Name
 		subnetName = "subnet-" + framework.RandomSuffix()
 		podName = "pod-" + framework.RandomSuffix()
-		cidr = framework.RandomCIDR(f.ClusterIpFamily)
+		cidr = framework.RandomCIDR(f.ClusterIPFamily)
 		if image == "" {
 			image = framework.GetKubeOvnImage(cs)
 		}
 
 		ginkgo.By("Creating subnet " + subnetName)
-		subnet = framework.MakeSubnet(subnetName, "", cidr, "", nil, nil, []string{namespaceName})
+		subnet = framework.MakeSubnet(subnetName, "", cidr, "", "", "", nil, nil, []string{namespaceName})
 		subnet = subnetClient.CreateSync(subnet)
 	})
 	ginkgo.AfterEach(func() {
@@ -50,7 +50,7 @@ var _ = framework.Describe("[group:pod]", func() {
 	})
 
 	framework.ConformanceIt("should support configuring routes via pod annotation", func() {
-		f.SkipVersionPriorTo(1, 12, "This feature was introduced inn v1.12")
+		f.SkipVersionPriorTo(1, 12, "This feature was introduced in v1.12")
 
 		ginkgo.By("Generating routes")
 		routes := make([]request.Route, 0, 4)

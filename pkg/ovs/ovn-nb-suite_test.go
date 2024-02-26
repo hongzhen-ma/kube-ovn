@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -13,7 +13,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-logr/stdr"
 	"github.com/ovn-org/libovsdb/client"
-	"github.com/ovn-org/libovsdb/database"
+	"github.com/ovn-org/libovsdb/database/inmemory"
 	"github.com/ovn-org/libovsdb/model"
 	"github.com/ovn-org/libovsdb/ovsdb"
 	"github.com/ovn-org/libovsdb/ovsdb/serverdb"
@@ -26,7 +26,7 @@ import (
 
 type OvnClientTestSuite struct {
 	suite.Suite
-	ovnClient *ovnClient
+	ovnClient *OVNNbClient
 }
 
 func (suite *OvnClientTestSuite) SetupSuite() {
@@ -39,7 +39,7 @@ func (suite *OvnClientTestSuite) SetupSuite() {
 	endpoint := fmt.Sprintf("unix:%s", sock)
 	require.FileExists(suite.T(), sock)
 
-	ovnClient, err := newOvnClient(suite.T(), endpoint, 10, "100.64.0.0/16,fd00:100:64::/64")
+	ovnClient, err := newOvnNbClient(suite.T(), endpoint, 10)
 	require.NoError(suite.T(), err)
 
 	suite.ovnClient = ovnClient
@@ -114,7 +114,7 @@ func (suite *OvnClientTestSuite) Test_LogicalSwitchUpdateLoadBalancerOp() {
 }
 
 func (suite *OvnClientTestSuite) Test_logicalSwitchUpdateAclOp() {
-	suite.test_logicalSwitchUpdateAclOp()
+	suite.testLogicalSwitchUpdateACLOp()
 }
 
 func (suite *OvnClientTestSuite) Test_LogicalSwitchOp() {
@@ -142,12 +142,16 @@ func (suite *OvnClientTestSuite) Test_SetLogicalSwitchPortVirtualParents() {
 	suite.testSetLogicalSwitchPortVirtualParents()
 }
 
+func (suite *OvnClientTestSuite) Test_SetLogicalSwitchPortArpProxy() {
+	suite.testSetLogicalSwitchPortArpProxy()
+}
+
 func (suite *OvnClientTestSuite) Test_SetLogicalSwitchPortSecurity() {
 	suite.testSetLogicalSwitchPortSecurity()
 }
 
 func (suite *OvnClientTestSuite) Test_SetSetLogicalSwitchPortExternalIds() {
-	suite.testSetSetLogicalSwitchPortExternalIds()
+	suite.testSetSetLogicalSwitchPortExternalIDs()
 }
 
 func (suite *OvnClientTestSuite) Test_SetLogicalSwitchPortSecurityGroup() {
@@ -215,6 +219,10 @@ func (suite *OvnClientTestSuite) Test_ListLogicalRouter() {
 	suite.testListLogicalRouter()
 }
 
+func (suite *OvnClientTestSuite) Test_testLogicalRouterUpdateLoadBalancers() {
+	suite.testLogicalRouterUpdateLoadBalancers()
+}
+
 func (suite *OvnClientTestSuite) Test_LogicalRouterUpdatePortOp() {
 	suite.testLogicalRouterUpdatePortOp()
 }
@@ -242,6 +250,10 @@ func (suite *OvnClientTestSuite) Test_CreatePeerRouterPort() {
 
 func (suite *OvnClientTestSuite) Test_UpdateLogicalRouterPortRA() {
 	suite.testUpdateLogicalRouterPortRA()
+}
+
+func (suite *OvnClientTestSuite) Test_UpdateLogicalRouterPortOptions() {
+	suite.testUpdateLogicalRouterPortOptions()
 }
 
 func (suite *OvnClientTestSuite) Test_CreateLogicalRouterPort() {
@@ -276,6 +288,18 @@ func (suite *OvnClientTestSuite) Test_logicalRouterPortFilter() {
 	suite.testlogicalRouterPortFilter()
 }
 
+func (suite *OvnClientTestSuite) Test_CreateBFD() {
+	suite.testCreateBFD()
+}
+
+func (suite *OvnClientTestSuite) Test_ListBFD() {
+	suite.testListBFD()
+}
+
+func (suite *OvnClientTestSuite) Test_DeleteBFD() {
+	suite.testDeleteBFD()
+}
+
 /* gateway_chassis unit test */
 func (suite *OvnClientTestSuite) Test_CreateGatewayChassises() {
 	suite.testCreateGatewayChassises()
@@ -306,8 +330,8 @@ func (suite *OvnClientTestSuite) Test_DeleteLoadBalancer() {
 	suite.testDeleteLoadBalancer()
 }
 
-func (suite *OvnClientTestSuite) Test_LoadBalancerDeleteVips() {
-	suite.testLoadBalancerDeleteVips()
+func (suite *OvnClientTestSuite) Test_LoadBalancerDeleteVip() {
+	suite.testLoadBalancerDeleteVip()
 }
 
 func (suite *OvnClientTestSuite) Test_GetLoadBalancer() {
@@ -318,12 +342,57 @@ func (suite *OvnClientTestSuite) Test_ListLoadBalancers() {
 	suite.testListLoadBalancers()
 }
 
-func (suite *OvnClientTestSuite) Test_LoadBalancerAddVips() {
-	suite.testLoadBalancerAddVips()
+func (suite *OvnClientTestSuite) Test_LoadBalancerAddVip() {
+	suite.testLoadBalancerAddVip()
 }
 
 func (suite *OvnClientTestSuite) Test_DeleteLoadBalancerOp() {
 	suite.testDeleteLoadBalancerOp()
+}
+
+func (suite *OvnClientTestSuite) Test_SetLoadBalancerAffinityTimeout() {
+	suite.testSetLoadBalancerAffinityTimeout()
+}
+
+func (suite *OvnClientTestSuite) Test_LoadBalancerAddIPPortMapping() {
+	suite.testLoadBalancerAddIPPortMapping()
+}
+
+func (suite *OvnClientTestSuite) Test_LoadBalancerDeleteIPPortMapping() {
+	suite.testLoadBalancerDeleteIPPortMapping()
+}
+
+func (suite *OvnClientTestSuite) Test_LoadBalancerWithHealthCheck() {
+	suite.testLoadBalancerWithHealthCheck()
+}
+
+/* load_balancer health check unit test */
+func (suite *OvnClientTestSuite) Test_CreateLoadBalancerHealthCheck() {
+	suite.testAddLoadBalancerHealthCheck()
+}
+
+func (suite *OvnClientTestSuite) Test_UpdateLoadBalancerHealthCheck() {
+	suite.testUpdateLoadBalancerHealthCheck()
+}
+
+func (suite *OvnClientTestSuite) Test_DeleteLoadBalancerHealthCheck() {
+	suite.testDeleteLoadBalancerHealthCheck()
+}
+
+func (suite *OvnClientTestSuite) Test_DeleteLoadBalancerHealthChecks() {
+	suite.testDeleteLoadBalancerHealthChecks()
+}
+
+func (suite *OvnClientTestSuite) Test_GetLoadBalancerHealthCheck() {
+	suite.testGetLoadBalancerHealthCheck()
+}
+
+func (suite *OvnClientTestSuite) Test_ListLoadBalancerHealthChecks() {
+	suite.testListLoadBalancerHealthChecks()
+}
+
+func (suite *OvnClientTestSuite) Test_DeleteLoadBalancerHealthCheckOp() {
+	suite.testDeleteLoadBalancerHealthCheckOp()
 }
 
 /* port_group unit test */
@@ -352,15 +421,15 @@ func (suite *OvnClientTestSuite) Test_ListPortGroups() {
 }
 
 func (suite *OvnClientTestSuite) Test_portGroupUpdatePortOp() {
-	suite.test_portGroupUpdatePortOp()
+	suite.testPortGroupUpdatePortOp()
 }
 
 func (suite *OvnClientTestSuite) Test_portGroupUpdateAclOp() {
-	suite.test_portGroupUpdateAclOp()
+	suite.testPortGroupUpdateACLOp()
 }
 
 func (suite *OvnClientTestSuite) Test_portGroupOp() {
-	suite.test_portGroupOp()
+	suite.testPortGroupOp()
 }
 
 /* address_set unit test */
@@ -385,40 +454,44 @@ func (suite *OvnClientTestSuite) Test_ListAddressSets() {
 }
 
 func (suite *OvnClientTestSuite) Test_addressSetFilter() {
-	suite.test_addressSetFilter()
+	suite.testAddressSetFilter()
 }
 
 /* acl unit test */
-func (suite *OvnClientTestSuite) Test_CreateIngressAcl() {
-	suite.testCreateIngressAcl()
+func (suite *OvnClientTestSuite) Test_testUpdateIngressAclOps() {
+	suite.testUpdateIngressACLOps()
 }
 
-func (suite *OvnClientTestSuite) Test_CreateEgressAcl() {
-	suite.testCreateEgressAcl()
+func (suite *OvnClientTestSuite) Test_UpdateEgressAclOps() {
+	suite.testUpdateEgressACLOps()
 }
 
 func (suite *OvnClientTestSuite) Test_CreateGatewayAcl() {
-	suite.testCreateGatewayAcl()
+	suite.testCreateGatewayACL()
 }
 
 func (suite *OvnClientTestSuite) Test_CreateNodeAcl() {
-	suite.testCreateNodeAcl()
+	suite.testCreateNodeACL()
 }
 
 func (suite *OvnClientTestSuite) Test_CreateSgDenyAllAcl() {
-	suite.testCreateSgDenyAllAcl()
+	suite.testCreateSgDenyAllACL()
+}
+
+func (suite *OvnClientTestSuite) Test_CreateSgBaseACL() {
+	suite.testCreateSgBaseACL()
 }
 
 func (suite *OvnClientTestSuite) Test_UpdateSgAcl() {
-	suite.testUpdateSgAcl()
+	suite.testUpdateSgACL()
 }
 
 func (suite *OvnClientTestSuite) Test_UpdateLogicalSwitchAcl() {
-	suite.testUpdateLogicalSwitchAcl()
+	suite.testUpdateLogicalSwitchACL()
 }
 
 func (suite *OvnClientTestSuite) Test_SetAclLog() {
-	suite.testSetAclLog()
+	suite.testSetACLLog()
 }
 
 func (suite *OvnClientTestSuite) Test_SetLogicalSwitchPrivate() {
@@ -426,7 +499,7 @@ func (suite *OvnClientTestSuite) Test_SetLogicalSwitchPrivate() {
 }
 
 func (suite *OvnClientTestSuite) Test_newSgRuleACL() {
-	suite.test_newSgRuleACL()
+	suite.testNewSgRuleACL()
 }
 
 func (suite *OvnClientTestSuite) Test_CreateAcls() {
@@ -437,8 +510,12 @@ func (suite *OvnClientTestSuite) Test_DeleteAcls() {
 	suite.testDeleteAcls()
 }
 
+func (suite *OvnClientTestSuite) Test_DeleteAcl() {
+	suite.testDeleteACL()
+}
+
 func (suite *OvnClientTestSuite) Test_GetAcl() {
-	suite.testGetAcl()
+	suite.testGetACL()
 }
 
 func (suite *OvnClientTestSuite) Test_ListAcls() {
@@ -446,15 +523,15 @@ func (suite *OvnClientTestSuite) Test_ListAcls() {
 }
 
 func (suite *OvnClientTestSuite) Test_newAcl() {
-	suite.test_newAcl()
+	suite.testNewACL()
 }
 
 func (suite *OvnClientTestSuite) Test_newNetworkPolicyAclMatch() {
-	suite.testnewNetworkPolicyAclMatch()
+	suite.testnewNetworkPolicyACLMatch()
 }
 
 func (suite *OvnClientTestSuite) Test_aclFilter() {
-	suite.test_aclFilter()
+	suite.testACLFilter()
 }
 
 /* logical_router_policy unit test */
@@ -483,11 +560,11 @@ func (suite *OvnClientTestSuite) Test_GetLogicalRouterPolicy() {
 }
 
 func (suite *OvnClientTestSuite) Test_newLogicalRouterPolicy() {
-	suite.test_newLogicalRouterPolicy()
+	suite.testNewLogicalRouterPolicy()
 }
 
 func (suite *OvnClientTestSuite) Test_policyFilter() {
-	suite.test_policyFilter()
+	suite.testPolicyFilter()
 }
 
 /* nat unit test */
@@ -516,11 +593,11 @@ func (suite *OvnClientTestSuite) Test_GetNat() {
 }
 
 func (suite *OvnClientTestSuite) Test_newNat() {
-	suite.test_newNat()
+	suite.testNewNat()
 }
 
 func (suite *OvnClientTestSuite) Test_natFilter() {
-	suite.test_natFilter()
+	suite.testNatFilter()
 }
 
 /* logical_router_static_route unit test */
@@ -549,7 +626,7 @@ func (suite *OvnClientTestSuite) Test_ListLogicalRouterStaticRoutes() {
 }
 
 func (suite *OvnClientTestSuite) Test_newLogicalRouterStaticRoute() {
-	suite.test_newLogicalRouterStaticRoute()
+	suite.testNewLogicalRouterStaticRoute()
 }
 
 /* dhcp options unit test */
@@ -558,11 +635,11 @@ func (suite *OvnClientTestSuite) Test_UpdateDHCPOptions() {
 }
 
 func (suite *OvnClientTestSuite) Test_updateDHCPv4Options() {
-	suite.test_updateDHCPv4Options()
+	suite.testUpdateDHCPv4Options()
 }
 
 func (suite *OvnClientTestSuite) Test_updateDHCPv6Options() {
-	suite.test_updateDHCPv6Options()
+	suite.testUpdateDHCPv6Options()
 }
 
 func (suite *OvnClientTestSuite) Test_DeleteDHCPOptionsByUUIDs() {
@@ -582,7 +659,7 @@ func (suite *OvnClientTestSuite) Test_ListDHCPOptions() {
 }
 
 func (suite *OvnClientTestSuite) Test_dhcpOptionsFilter() {
-	suite.test_dhcpOptionsFilter()
+	suite.testDhcpOptionsFilter()
 }
 
 /* mixed operations unit test */
@@ -613,23 +690,10 @@ func (suite *OvnClientTestSuite) Test_GetEntityInfo() {
 func Test_scratch(t *testing.T) {
 	t.SkipNow()
 	endpoint := "tcp:[172.20.149.35]:6641"
-	ovnClient, err := newOvnClient(t, endpoint, 10, "")
+	ovnClient, err := newOvnNbClient(t, endpoint, 10)
 	require.NoError(t, err)
 
-	lbName := "test-lb"
-	err = ovnClient.CreateLoadBalancer(lbName, "tcp", "ip_src")
-	require.NoError(t, err)
-
-	vips := map[string]string{
-		"10.96.0.1:443":           "192.168.20.11:6443",
-		"10.107.43.237:8080":      "10.244.0.100:8080,10.244.0.16:8080,10.244.0.17:8080",
-		"[fd00:10:96::e82f]:8080": "[fc00::af4:f]:8080,[fc00::af4:10]:8080,[fc00::af4:11]:8080",
-	}
-
-	err = ovnClient.LoadBalancerAddVips(lbName, vips)
-	require.NoError(t, err)
-
-	err = ovnClient.LoadBalancerDeleteVips(lbName, "10.96.0.1:443")
+	err = ovnClient.DeleteAcls("test_pg", portGroupKey, ovnnb.ACLDirectionToLport, nil)
 	require.NoError(t, err)
 }
 
@@ -638,7 +702,7 @@ func newOVSDBServer(t *testing.T, dbModel model.ClientDBModel, schema ovsdb.Data
 	require.NoError(t, err)
 	serverSchema := serverdb.Schema()
 
-	db := database.NewInMemoryDatabase(map[string]model.ClientDBModel{
+	db := inmemory.NewDatabase(map[string]model.ClientDBModel{
 		schema.Name:       dbModel,
 		serverSchema.Name: serverDBModel,
 	})
@@ -652,7 +716,7 @@ func newOVSDBServer(t *testing.T, dbModel model.ClientDBModel, schema ovsdb.Data
 	server, err := server.NewOvsdbServer(db, dbMod, svrMod)
 	require.NoError(t, err)
 
-	tmpfile := fmt.Sprintf("/tmp/ovsdb-%d.sock", rand.Intn(10000))
+	tmpfile := fmt.Sprintf("/tmp/ovsdb-%d.sock", rand.IntN(10000))
 	t.Cleanup(func() {
 		os.Remove(tmpfile)
 	})
@@ -669,16 +733,15 @@ func newOVSDBServer(t *testing.T, dbModel model.ClientDBModel, schema ovsdb.Data
 	return server, tmpfile
 }
 
-func newOvnClient(t *testing.T, ovnNbAddr string, ovnNbTimeout int, nodeSwitchCIDR string) (*ovnClient, error) {
+func newOvnNbClient(t *testing.T, ovnNbAddr string, ovnNbTimeout int) (*OVNNbClient, error) {
 	nbClient, err := newNbClient(ovnNbAddr, ovnNbTimeout)
 	require.NoError(t, err)
 
-	return &ovnClient{
-		ovnNbClient: ovnNbClient{
+	return &OVNNbClient{
+		ovsDbClient: ovsDbClient{
 			Client:  nbClient,
 			Timeout: time.Duration(ovnNbTimeout) * time.Second,
 		},
-		NodeSwitchCIDR: nodeSwitchCIDR,
 	}, nil
 }
 
@@ -713,20 +776,22 @@ func newNbClient(addr string, timeout int) (client.Client, error) {
 	}
 
 	monitorOpts := []client.MonitorOption{
-		client.WithTable(&ovnnb.LogicalRouter{}),
-		client.WithTable(&ovnnb.LogicalRouterPort{}),
-		client.WithTable(&ovnnb.LogicalRouterPolicy{}),
-		client.WithTable(&ovnnb.LogicalRouterStaticRoute{}),
-		client.WithTable(&ovnnb.NAT{}),
-		client.WithTable(&ovnnb.LogicalSwitch{}),
-		client.WithTable(&ovnnb.LogicalSwitchPort{}),
-		client.WithTable(&ovnnb.PortGroup{}),
-		client.WithTable(&ovnnb.NBGlobal{}),
+		client.WithTable(&ovnnb.ACL{}),
+		client.WithTable(&ovnnb.AddressSet{}),
+		client.WithTable(&ovnnb.BFD{}),
+		client.WithTable(&ovnnb.DHCPOptions{}),
 		client.WithTable(&ovnnb.GatewayChassis{}),
 		client.WithTable(&ovnnb.LoadBalancer{}),
-		client.WithTable(&ovnnb.AddressSet{}),
-		client.WithTable(&ovnnb.ACL{}),
-		client.WithTable(&ovnnb.DHCPOptions{}),
+		client.WithTable(&ovnnb.LoadBalancerHealthCheck{}),
+		client.WithTable(&ovnnb.LogicalRouterPolicy{}),
+		client.WithTable(&ovnnb.LogicalRouterPort{}),
+		client.WithTable(&ovnnb.LogicalRouterStaticRoute{}),
+		client.WithTable(&ovnnb.LogicalRouter{}),
+		client.WithTable(&ovnnb.LogicalSwitchPort{}),
+		client.WithTable(&ovnnb.LogicalSwitch{}),
+		client.WithTable(&ovnnb.NAT{}),
+		client.WithTable(&ovnnb.NBGlobal{}),
+		client.WithTable(&ovnnb.PortGroup{}),
 	}
 	if _, err = c.Monitor(context.TODO(), c.NewMonitor(monitorOpts...)); err != nil {
 		return nil, err

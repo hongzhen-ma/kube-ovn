@@ -1,8 +1,9 @@
 package network_policy
 
 import (
+	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
@@ -11,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	netv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
@@ -23,13 +23,14 @@ import (
 	"github.com/kubeovn/kube-ovn/test/e2e/framework"
 )
 
-var _ = framework.Describe("[group:network-policy]", func() {
+var _ = framework.SerialDescribe("[group:network-policy]", func() {
 	f := framework.NewDefaultFramework("network-policy")
 
 	var subnet *apiv1.Subnet
 	var cs clientset.Interface
 	var podClient *framework.PodClient
 	var subnetClient *framework.SubnetClient
+	var defaultServiceClient *framework.ServiceClient
 	var netpolClient *framework.NetworkPolicyClient
 	var daemonSetClient *framework.DaemonSetClient
 	var namespaceName, netpolName, subnetName, podName string
@@ -39,13 +40,14 @@ var _ = framework.Describe("[group:network-policy]", func() {
 		cs = f.ClientSet
 		podClient = f.PodClient()
 		subnetClient = f.SubnetClient()
+		defaultServiceClient = f.ServiceClientNS("default")
 		netpolClient = f.NetworkPolicyClient()
 		daemonSetClient = f.DaemonSetClientNS(framework.KubeOvnNamespace)
 		namespaceName = f.Namespace.Name
 		netpolName = "netpol-" + framework.RandomSuffix()
 		podName = "pod-" + framework.RandomSuffix()
 		subnetName = "subnet-" + framework.RandomSuffix()
-		cidr = framework.RandomCIDR(f.ClusterIpFamily)
+		cidr = framework.RandomCIDR(f.ClusterIPFamily)
 
 		if image == "" {
 			image = framework.GetKubeOvnImage(cs)
@@ -75,18 +77,18 @@ var _ = framework.Describe("[group:network-policy]", func() {
 		_ = netpolClient.Create(netpol)
 
 		ginkgo.By("Creating subnet " + subnetName)
-		subnet = framework.MakeSubnet(subnetName, "", cidr, "", nil, nil, nil)
+		subnet = framework.MakeSubnet(subnetName, "", cidr, "", "", "", nil, nil, nil)
 		subnet = subnetClient.CreateSync(subnet)
 
 		ginkgo.By("Creating pod " + podName)
-		port := strconv.Itoa(8000 + rand.Intn(1000))
+		port := strconv.Itoa(8000 + rand.IntN(1000))
 		args := []string{"netexec", "--http-port", port}
 		annotations := map[string]string{util.LogicalSwitchAnnotation: subnetName}
 		pod := framework.MakePod(namespaceName, podName, nil, annotations, framework.AgnhostImage, nil, args)
 		pod = podClient.CreateSync(pod)
 
 		ginkgo.By("Getting nodes")
-		nodeList, err := e2enode.GetReadySchedulableNodes(cs)
+		nodeList, err := e2enode.GetReadySchedulableNodes(context.Background(), cs)
 		framework.ExpectNoError(err)
 		framework.ExpectNotEmpty(nodeList.Items)
 
@@ -116,19 +118,19 @@ var _ = framework.Describe("[group:network-policy]", func() {
 
 				ginkgo.By("Checking connection from node " + nodeName + " to " + podName + " via " + protocol)
 				ginkgo.By(fmt.Sprintf(`Executing %q in pod %s/%s`, cmd, hostPod.Namespace, hostPod.Name))
-				err := wait.PollImmediate(2*time.Second, time.Minute, func() (bool, error) {
+				framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
 					_, err := e2epodoutput.RunHostCmd(hostPod.Namespace, hostPod.Name, cmd)
 					return err != nil, nil
-				})
+				}, "")
 				framework.ExpectNoError(err)
 			}
 
 			ginkgo.By("Checking connection from node " + podSameNode.Spec.NodeName + " to " + podName + " via " + protocol)
 			ginkgo.By(fmt.Sprintf(`Executing %q in pod %s/%s`, cmd, podSameNode.Namespace, podSameNode.Name))
-			err := wait.PollImmediate(2*time.Second, time.Minute, func() (bool, error) {
+			framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
 				_, err := e2epodoutput.RunHostCmd(podSameNode.Namespace, podSameNode.Name, cmd)
 				return err == nil, nil
-			})
+			}, "")
 			framework.ExpectNoError(err)
 
 			// check one more time
@@ -144,5 +146,50 @@ var _ = framework.Describe("[group:network-policy]", func() {
 				framework.ExpectError(err)
 			}
 		}
+	})
+
+	framework.ConformanceIt("should be able to access svc with backend host network pod after any other ingress network policy rules created", func() {
+		ginkgo.By("Creating network policy " + netpolName)
+		netpol := &netv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: netpolName,
+			},
+			Spec: netv1.NetworkPolicySpec{
+				Ingress: []netv1.NetworkPolicyIngressRule{
+					{
+						From: []netv1.NetworkPolicyPeer{
+							{
+								PodSelector:       nil,
+								NamespaceSelector: nil,
+								IPBlock:           &netv1.IPBlock{CIDR: "0.0.0.0/0", Except: []string{"127.0.0.1/32"}},
+							},
+						},
+					},
+				},
+				PolicyTypes: []netv1.PolicyType{netv1.PolicyTypeIngress},
+			},
+		}
+		_ = netpolClient.Create(netpol)
+
+		ginkgo.By("Creating pod " + podName)
+		pod := framework.MakePod(namespaceName, podName, nil, nil, framework.AgnhostImage, nil, nil)
+		pod = podClient.CreateSync(pod)
+
+		svc := defaultServiceClient.Get("kubernetes")
+		clusterIP := svc.Spec.ClusterIP
+
+		ginkgo.By("Checking connection from pod " + podName + " to " + clusterIP + " via TCP")
+
+		cmd := fmt.Sprintf("curl -k -q -s --connect-timeout 2 https://%s", net.JoinHostPort(clusterIP, "443"))
+		ginkgo.By(fmt.Sprintf(`Executing %q in pod %s/%s`, cmd, pod.Namespace, pod.Name))
+
+		var retErr error
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
+			_, err := e2epodoutput.RunHostCmd(pod.Namespace, pod.Name, cmd)
+			retErr = err
+			return err == nil, nil
+		}, "")
+
+		framework.ExpectNoError(retErr)
 	})
 })

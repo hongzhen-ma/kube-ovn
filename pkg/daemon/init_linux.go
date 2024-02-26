@@ -1,14 +1,11 @@
 package daemon
 
 import (
+	"slices"
 	"time"
 
-	"k8s.io/klog/v2"
-
-	"github.com/Wifx/gonetworkmanager"
 	"github.com/vishvananda/netlink"
-
-	"github.com/kubeovn/kube-ovn/pkg/util"
+	"k8s.io/klog/v2"
 )
 
 var routeScopeOrders = [...]netlink.Scope{
@@ -16,35 +13,6 @@ var routeScopeOrders = [...]netlink.Scope{
 	netlink.SCOPE_LINK,
 	netlink.SCOPE_SITE,
 	netlink.SCOPE_UNIVERSE,
-}
-
-func nmSetManaged(device string, managed bool) error {
-	nm, err := gonetworkmanager.NewNetworkManager()
-	if err != nil {
-		klog.V(5).Infof("failed to connect to NetworkManager: %v", err)
-		return nil
-	}
-
-	d, err := nm.GetDeviceByIpIface(device)
-	if err != nil {
-		klog.Errorf("failed to get device by IP iface %s: %v", device, err)
-		return err
-	}
-	current, err := d.GetPropertyManaged()
-	if err != nil {
-		klog.Errorf("failed to get device property managed: %v", err)
-		return err
-	}
-	if current == managed {
-		return nil
-	}
-
-	if err = d.SetPropertyManaged(managed); err != nil {
-		klog.Errorf("failed to set device property managed to %v: %v", managed, err)
-		return err
-	}
-
-	return nil
 }
 
 // wait systemd-networkd to finish interface configuration
@@ -80,7 +48,7 @@ func waitNetworkdConfiguration(linkIndex int) {
 	}
 }
 
-func changeProvideNicName(current, target string) (bool, error) {
+func (c *Controller) changeProvideNicName(current, target string) (bool, error) {
 	link, err := netlink.LinkByName(current)
 	if err != nil {
 		if _, ok := err.(netlink.LinkNotFoundError); ok {
@@ -95,13 +63,6 @@ func changeProvideNicName(current, target string) (bool, error) {
 		return true, nil
 	}
 
-	// set link unmanaged by NetworkManager
-	if err = nmSetManaged(current, false); err != nil {
-		klog.Errorf("failed set device %s to unmanaged by NetworkManager: %v", current, err)
-		return false, err
-	}
-
-	klog.Infof("renaming link %s as %s", current, target)
 	addresses, err := netlink.AddrList(link, netlink.FAMILY_ALL)
 	if err != nil {
 		klog.Errorf("failed to list addresses of link %s: %v", current, err)
@@ -113,6 +74,13 @@ func changeProvideNicName(current, target string) (bool, error) {
 		return false, err
 	}
 
+	// set link unmanaged by NetworkManager
+	if err = c.nmSyncer.SetManaged(current, false); err != nil {
+		klog.Errorf("failed to set device %s unmanaged by NetworkManager: %v", current, err)
+		return false, err
+	}
+
+	klog.Infof("renaming link %s as %s", current, target)
 	if err = netlink.LinkSetDown(link); err != nil {
 		klog.Errorf("failed to set link %s down: %v", current, err)
 		return false, err
@@ -162,7 +130,7 @@ func changeProvideNicName(current, target string) (bool, error) {
 		return false, err
 	}
 
-	if util.ContainsString(link.Attrs().Properties.AlternativeIfnames, current) {
+	if slices.Contains(link.Attrs().Properties.AlternativeIfnames, current) {
 		if err = netlink.LinkDelAltName(link, current); err != nil {
 			klog.Errorf("failed to delete alternative name %s from link %s: %v", current, link.Attrs().Name, err)
 			return false, err

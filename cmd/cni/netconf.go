@@ -1,7 +1,7 @@
 //go:build !windows
 // +build !windows
 
-package cni
+package main
 
 import (
 	"github.com/containernetworking/cni/pkg/types"
@@ -19,8 +19,9 @@ type netConf struct {
 	DeviceID string `json:"deviceID"`
 	VfDriver string `json:"vf_driver"`
 	// for dpdk
-	VhostUserSocketVolumeName string `json:"vhost_user_socket_volume_name"`
-	VhostUserSocketName       string `json:"vhost_user_socket_name"`
+	VhostUserSocketVolumeName  string `json:"vhost_user_socket_volume_name"`
+	VhostUserSocketName        string `json:"vhost_user_socket_name"`
+	VhostUserSocketConsumption string `json:"vhost_user_socket_consumption"`
 }
 
 func (n *netConf) postLoad() {

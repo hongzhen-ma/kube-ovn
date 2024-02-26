@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
@@ -138,4 +139,13 @@ func NetworkDisconnect(networkID, containerID string) error {
 	defer cli.Close()
 
 	return cli.NetworkDisconnect(context.Background(), networkID, containerID, false)
+}
+
+func NetworkRemove(networkID string) error {
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return err
+	}
+	defer cli.Close()
+	return cli.NetworkRemove(context.Background(), networkID)
 }

@@ -10,8 +10,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HELM_VERSION: v3.11.1
-  SUBMARINER_VERSION: '0.14.3'
+  GO_VERSION: ''
+  KIND_VERSION: v0.22.0
+  HELM_VERSION: v3.14.1
+  SUBMARINER_VERSION: '0.16.3'
 
 jobs:
   k8s-conformance-e2e:
@@ -23,10 +25,9 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
-          - release-1.8
         ip-family:
           - ipv4
           - ipv6
@@ -35,15 +36,16 @@ jobs:
           - overlay
           - underlay
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Remove DNS search domain
         run: |
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -52,7 +54,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -64,15 +66,16 @@ jobs:
         run: mkdir -p test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -105,30 +108,30 @@ jobs:
   k8s-netpol-e2e:
     name: Kubernetes Network Policy E2E
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
-          - release-1.8
         ip-family:
           - ipv4
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Remove DNS search domain
         run: |
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -137,7 +140,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -149,15 +152,16 @@ jobs:
         run: mkdir -p test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -183,87 +187,6 @@ jobs:
       - name: Run E2E
         run: make k8s-netpol-e2e
 
-  k8s-netpol-legacy-e2e:
-    name: Kubernetes Network Policy Legacy E2E
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        branch:
-          - master
-          - release-1.11
-          - release-1.10
-          - release-1.9
-          - release-1.8
-        ip-family:
-          - ipv4
-          - ipv6
-          - dual
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Remove DNS search domain
-        run: |
-          sudo sed -i '/^search/d' /etc/resolv.conf
-          sudo systemctl restart docker
-
-      - uses: actions/setup-go@v4
-        with:
-          go-version-file: go.mod
-          check-latest: true
-          cache: false
-
-      - name: Export Go full version
-        run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
-
-      - name: Go cache
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles('**/go.sum') }}
-          restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
-
-      - name: Create branch directory
-        run: mkdir -p test/e2e/k8s-network/branches/${{ matrix.branch }}
-
-      - name: Check out branch
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ matrix.branch }}
-          fetch-depth: 1
-          path: test/e2e/k8s-network/branches/${{ matrix.branch }}
-
-      - name: Install kind
-        uses: helm/kind-action@v1
-        with:
-          install_only: true
-
-      - name: Install ginkgo
-        working-directory: ${{ env.E2E_DIR }}
-        run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
-
-      - name: Create kind cluster
-        working-directory: test/e2e/k8s-network/branches/${{ matrix.branch }}
-        run: |
-          sudo pip3 install j2cli
-          sudo pip3 install "j2cli[yaml]"
-          sudo PATH=~/.local/bin:$PATH make kind-init-${{ matrix.ip-family }}
-          sudo cp -r /root/.kube/ ~/.kube/
-          sudo chown -R $(id -un). ~/.kube/
-
-      - name: Install Kube-OVN
-        working-directory: test/e2e/k8s-network/branches/${{ matrix.branch }}
-        run: |
-          version=$(grep -E '^VERSION="v([0-9]+\.){2}[0-9]+"$' dist/images/install.sh | head -n1 | awk -F= '{print $2}' | tr -d '"')
-          docker pull kubeovn/kube-ovn:$version
-          VERSION=$version make kind-install-${{ matrix.ip-family }}
-
-      - name: Run E2E
-        run: make k8s-netpol-legacy-e2e
-
   cyclonus-netpol-e2e:
     name: Cyclonus Network Policy E2E
     runs-on: ubuntu-22.04
@@ -273,16 +196,15 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
-          - release-1.8
         ip-family:
           - ipv4
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Remove DNS search domain
         run: |
@@ -293,15 +215,16 @@ jobs:
         run: mkdir -p test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Create kind cluster
@@ -326,16 +249,16 @@ jobs:
   kube-ovn-conformance-e2e:
     name: Kube-OVN Conformance E2E
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
-          - release-1.8
+          - release-1.12-mc
         ip-family:
           - ipv4
           - ipv6
@@ -344,9 +267,10 @@ jobs:
           - overlay
           - underlay
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -355,7 +279,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -367,15 +291,16 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -414,13 +339,14 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -429,7 +355,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -441,15 +367,16 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -477,53 +404,6 @@ jobs:
           E2E_BRANCH: ${{ matrix.branch }}
         run: make kube-ovn-ic-conformance-e2e
 
-  ha-installation-test:
-    name: HA Installation Test
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        branch:
-          - release-1.8
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Create branch directory
-        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
-
-      - name: Check out branch
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ matrix.branch }}
-          fetch-depth: 1
-          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
-
-      - name: Install kind
-        uses: helm/kind-action@v1
-        with:
-          install_only: true
-
-      - name: Create kind cluster
-        working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
-        run: |
-          sudo pip3 install j2cli
-          sudo pip3 install "j2cli[yaml]"
-          sudo PATH=~/.local/bin:$PATH make kind-init-ha
-          sudo cp -r /root/.kube/ ~/.kube/
-          sudo chown -R $(id -un). ~/.kube/
-
-      - name: Install Kube-OVN
-        working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
-        run: |
-          version=$(grep -E '^VERSION="v([0-9]+\.){2}[0-9]+"$' dist/images/install.sh | head -n1 | awk -F= '{print $2}' | tr -d '"')
-          docker pull kubeovn/kube-ovn:$version
-          sudo ENABLE_SSL=true VERSION=$version make kind-install
-
-      - name: Cleanup
-        working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
-        run: sh dist/images/cleanup.sh
-
   underlay-logical-gateway-installation-test:
     name: Underlay Logical Gateway Installation Test
     runs-on: ubuntu-22.04
@@ -533,25 +413,26 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Create kind cluster
@@ -583,26 +464,26 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
-          - release-1.8
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Create kind cluster
@@ -636,26 +517,26 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
-          - release-1.8
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Create kind cluster
@@ -689,22 +570,15 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
+          - release-1.12-mc
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Create branch directory
-        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
-
-      - name: Check out branch
-        uses: actions/checkout@v3
+      - uses: actions/setup-go@v5
         with:
-          ref: ${{ matrix.branch }}
-          fetch-depth: 1
-          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
-
-      - uses: actions/setup-go@v4
-        with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -713,7 +587,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -721,9 +595,20 @@ jobs:
           key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles('**/go.sum') }}
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
-      - name: Install kind
-        uses: helm/kind-action@v1
+      - name: Create branch directory
+        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Check out branch
+        uses: actions/checkout@v4
         with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 1
+          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Install kind
+        uses: helm/kind-action@v1.9.0
+        with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -739,11 +624,7 @@ jobs:
           sudo cp -r /root/.kube/ ~/.kube/
           sudo chown -R $(id -un). ~/.kube/
 
-      - name: Install Multus
-        working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
-        run: make kind-install-multus
-
-      - name: Install Kube-OVN
+      - name: Install Multus and Kube-OVN
         working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
         run: |
           version=$(grep -E '^VERSION="v([0-9]+\.){2}[0-9]+"$' dist/images/install.sh | head -n1 | awk -F= '{print $2}' | tr -d '"')
@@ -755,7 +636,7 @@ jobs:
         run: make kube-ovn-lb-svc-conformance-e2e
 
   kubevirt-e2e:
-    name: Kubevirt vm E2E
+    name: Kubevirt VM E2E
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
@@ -763,21 +644,15 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
+          - release-1.12-mc
+  
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Create branch directory
-        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
-
-      - name: Check out branch
-        uses: actions/checkout@v3
+      - uses: actions/setup-go@v5
         with:
-          ref: ${{ matrix.branch }}
-          fetch-depth: 1
-          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
-
-      - uses: actions/setup-go@v4
-        with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -786,7 +661,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -794,9 +669,20 @@ jobs:
           key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles('**/go.sum') }}
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
-      - name: Install kind
-        uses: helm/kind-action@v1
+      - name: Create branch directory
+        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Check out branch
+        uses: actions/checkout@v4
         with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 1
+          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Install kind
+        uses: helm/kind-action@v1.9.0
+        with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -831,21 +717,13 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Create branch directory
-        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
-
-      - name: Check out branch
-        uses: actions/checkout@v3
+      - uses: actions/setup-go@v5
         with:
-          ref: ${{ matrix.branch }}
-          fetch-depth: 1
-          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
-
-      - uses: actions/setup-go@v4
-        with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -854,7 +732,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -862,9 +740,20 @@ jobs:
           key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles('**/go.sum') }}
           restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
 
-      - name: Install kind
-        uses: helm/kind-action@v1
+      - name: Create branch directory
+        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Check out branch
+        uses: actions/checkout@v4
         with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 1
+          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Install kind
+        uses: helm/kind-action@v1.9.0
+        with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -899,26 +788,26 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
-          - release-1.8
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Create kind cluster
@@ -949,13 +838,12 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
-          - release-1.8
     steps:
-      - uses: actions/checkout@v3
-      - uses: azure/setup-helm@v3
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4.0.0
         with:
           version: '${{ env.HELM_VERSION }}'
 
@@ -964,8 +852,9 @@ jobs:
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -974,7 +863,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -986,15 +875,16 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -1006,6 +896,7 @@ jobs:
         run: |
           sudo pip3 install j2cli
           sudo pip3 install "j2cli[yaml]"
+          sudo PATH=~/.local/bin:$PATH make kind-init-cilium-chaining || \
           sudo PATH=~/.local/bin:$PATH make kind-init
           sudo cp -r /root/.kube/ ~/.kube/
           sudo chown -R $(id -un). ~/.kube/
@@ -1026,8 +917,8 @@ jobs:
         working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
         run: sh dist/images/cleanup.sh
 
-  kube-ovn-security-e2e:
-    name: Kube-OVN Security E2E
+  kube-ovn-ha-e2e:
+    name: Kube-OVN HA E2E
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
@@ -1035,9 +926,10 @@ jobs:
       matrix:
         branch:
           - master
+          - release-1.12
           - release-1.11
-          - release-1.10
           - release-1.9
+          - release-1.12-mc
         ssl:
           - "true"
           - "false"
@@ -1049,9 +941,10 @@ jobs:
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -1060,7 +953,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -1072,15 +965,16 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -1109,7 +1003,9 @@ jobs:
         env:
           E2E_BRANCH: ${{ matrix.branch }}
           E2E_IP_FAMILY: ${{ matrix.ip-family }}
-        run: make kube-ovn-security-e2e
+        run: |
+          make kube-ovn-security-e2e
+          make kube-ovn-ha-e2e
 
       - name: Cleanup
         run: sh dist/images/cleanup.sh
@@ -1123,16 +1019,20 @@ jobs:
       matrix:
         case:
           - release-1.9 => release-1.11
+          - release-1.9 => release-1.12
           - release-1.9 => master
+          - release-1.11 => release-1.12
           - release-1.11 => master
+          - release-1.12 => master
     steps:
-      - uses: actions/checkout@v3
-      - uses: azure/setup-helm@v3
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4.0.0
         with:
           version: '${{ env.HELM_VERSION }}'
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -1141,7 +1041,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -1159,21 +1059,22 @@ jobs:
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.VERSION_FROM }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ env.VERSION_FROM }}
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.VERSION_TO }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ env.VERSION_TO }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install ginkgo
@@ -1184,7 +1085,7 @@ jobs:
         run: |
           sudo pip3 install j2cli
           sudo pip3 install "j2cli[yaml]"
-          sudo PATH=~/.local/bin:$PATH make kind-init
+          sudo PATH=~/.local/bin:$PATH make kind-init-ha
           sudo cp -r /root/.kube/ ~/.kube/
           sudo chown -R $(id -un). ~/.kube/
 
@@ -1200,16 +1101,7 @@ jobs:
         run: |
           version=$(grep -E '^VERSION="v([0-9]+\.){2}[0-9]+"$' dist/images/install.sh | head -n1 | awk -F= '{print $2}' | tr -d '"')
           docker pull kubeovn/kube-ovn:$version
-
-          restart_ovs=false
-          v1=$(printf "$VERSION_FROM\\nrelease-1.11" | sort -Vr | head -n1)
-          v2=$(printf "$VERSION_TO\\nrelease-1.12" | sort -Vr | head -n1)
-          if [ $v1 = "release-1.11" ]; then
-            if [ $VERSION_TO = "master" -o $VERSION_TO = $v2 ]; then
-              restart_ovs=true
-            fi
-          fi
-          CHART_UPGRADE_RESTART_OVS=$restart_ovs VERSION=$version make kind-upgrade-chart
+          VERSION=$version make kind-upgrade-chart
 
       - name: Run E2E
         env:
@@ -1222,29 +1114,31 @@ jobs:
 
   kube-ovn-submariner-conformance-e2e:
     name: Kube-OVN Submariner Conformance E2E
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         branch:
           - master
+          - release-1.12
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Install kind
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.9.0
         with:
+          version: ${{ env.KIND_VERSION }}
           install_only: true
 
       - name: Install submariner subctl
@@ -1275,3 +1169,143 @@ jobs:
       - name: Cleanup
         working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
         run: sh dist/images/cleanup.sh
+
+  iptables-vpc-nat-gw-conformance-e2e:
+    name: Iptables VPC NAT Gateway E2E
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - master
+          - release-1.12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION || '' }}
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+
+      - name: Export Go full version
+        run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
+
+      - name: Go cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
+
+      - name: Create branch directory
+        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 1
+          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Install kind
+        uses: helm/kind-action@v1.9.0
+        with:
+          version: ${{ env.KIND_VERSION }}
+          install_only: true
+
+      - name: Install ginkgo
+        run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
+
+      - name: Create kind cluster
+        working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+        run: |
+          sudo pip3 install j2cli
+          sudo pip3 install "j2cli[yaml]"
+          sudo PATH=~/.local/bin:$PATH make kind-init
+          sudo cp -r /root/.kube/ ~/.kube/
+          sudo chown -R $(id -un). ~/.kube/
+
+      - name: Install Kube-OVN with VPC NAT gateway enabled
+        working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+        run: |
+          version=$(grep -E '^VERSION="v([0-9]+\.){2}[0-9]+"$' dist/images/install.sh | head -n1 | awk -F= '{print $2}' | tr -d '"')
+          docker pull kubeovn/kube-ovn:$version
+          docker pull kubeovn/vpc-nat-gateway:$version
+          VERSION=$version make kind-install-vpc-nat-gw
+
+      - name: Run E2E
+        run: make iptables-vpc-nat-gw-conformance-e2e
+
+  ovn-vpc-nat-gw-conformance-e2e:
+    name: OVN VPC NAT Gateway E2E
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - master
+          - release-1.12
+          - release-1.12-mc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION || '' }}
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+
+      - name: Export Go full version
+        run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
+
+      - name: Go cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-${{ hashFiles('**/go.sum') }}
+          restore-keys: ${{ runner.os }}-e2e-${{ env.GO_FULL_VER }}-x86-
+
+      - name: Create branch directory
+        run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 1
+          path: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+
+      - name: Install kind
+        uses: helm/kind-action@v1.9.0
+        with:
+          version: ${{ env.KIND_VERSION }}
+          install_only: true
+
+      - name: Install ginkgo
+        run: go install -v -mod=mod github.com/onsi/ginkgo/v2/ginkgo
+
+      - name: Create kind cluster
+        working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+        run: |
+          sudo pip3 install j2cli
+          sudo pip3 install "j2cli[yaml]"
+          sudo PATH=~/.local/bin:$PATH make kind-init
+          sudo cp -r /root/.kube/ ~/.kube/
+          sudo chown -R $(id -un). ~/.kube/
+
+      - name: Install Kube-OVN
+        working-directory: test/e2e/kube-ovn/branches/${{ matrix.branch }}
+        run: |
+          version=$(grep -E '^VERSION="v([0-9]+\.){2}[0-9]+"$' dist/images/install.sh | head -n1 | awk -F= '{print $2}' | tr -d '"')
+          docker pull kubeovn/kube-ovn:$version
+          VERSION=$version make kind-install
+
+      - name: Run E2E
+        run: make ovn-vpc-nat-gw-conformance-e2e

@@ -2,6 +2,7 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
@@ -11,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/kubernetes/test/e2e/framework"
 
 	"github.com/onsi/gomega"
 
@@ -32,8 +34,8 @@ func (f *Framework) ProviderNetworkClient() *ProviderNetworkClient {
 	}
 }
 
-func (s *ProviderNetworkClient) Get(name string) *apiv1.ProviderNetwork {
-	pn, err := s.ProviderNetworkInterface.Get(context.TODO(), name, metav1.GetOptions{})
+func (c *ProviderNetworkClient) Get(name string) *apiv1.ProviderNetwork {
+	pn, err := c.ProviderNetworkInterface.Get(context.TODO(), name, metav1.GetOptions{})
 	ExpectNoError(err)
 	return pn
 }
@@ -59,8 +61,8 @@ func (c *ProviderNetworkClient) Patch(original, modified *apiv1.ProviderNetwork)
 	ExpectNoError(err)
 
 	var patchedProviderNetwork *apiv1.ProviderNetwork
-	err = wait.PollImmediate(2*time.Second, timeout, func() (bool, error) {
-		pn, err := c.ProviderNetworkInterface.Patch(context.TODO(), original.Name, types.MergePatchType, patch, metav1.PatchOptions{}, "")
+	err = wait.PollUntilContextTimeout(context.Background(), 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		pn, err := c.ProviderNetworkInterface.Patch(ctx, original.Name, types.MergePatchType, patch, metav1.PatchOptions{}, "")
 		if err != nil {
 			return handleWaitingAPIError(err, false, "patch provider network %q", original.Name)
 		}
@@ -71,17 +73,17 @@ func (c *ProviderNetworkClient) Patch(original, modified *apiv1.ProviderNetwork)
 		return patchedProviderNetwork.DeepCopy()
 	}
 
-	if IsTimeout(err) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		Failf("timed out while retrying to patch provider network %s", original.Name)
 	}
-	ExpectNoError(maybeTimeoutError(err, "patching provider network %s", original.Name))
+	Failf("error occurred while retrying to patch provider network %s: %v", original.Name, err)
 
 	return nil
 }
 
 // PatchSync patches the provider network and waits for the provider network to be ready for `timeout`.
 // If the provider network doesn't become ready before the timeout, it will fail the test.
-func (c *ProviderNetworkClient) PatchSync(original, modified *apiv1.ProviderNetwork, requiredNodes []string, timeout time.Duration) *apiv1.ProviderNetwork {
+func (c *ProviderNetworkClient) PatchSync(original, modified *apiv1.ProviderNetwork, _ []string, timeout time.Duration) *apiv1.ProviderNetwork {
 	pn := c.Patch(original, modified)
 	ExpectTrue(c.WaitToBeUpdated(pn, timeout))
 	ExpectTrue(c.WaitToBeReady(pn.Name, timeout))
@@ -170,38 +172,18 @@ func (c *ProviderNetworkClient) WaitToBeUpdated(pn *apiv1.ProviderNetwork, timeo
 }
 
 // WaitToDisappear waits the given timeout duration for the specified provider network to disappear.
-func (c *ProviderNetworkClient) WaitToDisappear(name string, interval, timeout time.Duration) error {
-	var lastProviderNetwork *apiv1.ProviderNetwork
-	err := wait.PollImmediate(interval, timeout, func() (bool, error) {
-		Logf("Waiting for provider network %s to disappear", name)
-		subnets, err := c.List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			return handleWaitingAPIError(err, true, "listing subnets")
+func (c *ProviderNetworkClient) WaitToDisappear(name string, _, timeout time.Duration) error {
+	err := framework.Gomega().Eventually(context.Background(), framework.HandleRetry(func(ctx context.Context) (*apiv1.ProviderNetwork, error) {
+		pn, err := c.ProviderNetworkInterface.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil, nil
 		}
-		found := false
-		for i, subnet := range subnets.Items {
-			if subnet.Name == name {
-				Logf("Provider network %s still exists", name)
-				found = true
-				lastProviderNetwork = &(subnets.Items[i])
-				break
-			}
-		}
-		if !found {
-			Logf("Provider network %s no longer exists", name)
-			return true, nil
-		}
-		return false, nil
-	})
-	if err == nil {
-		return nil
+		return pn, err
+	})).WithTimeout(timeout).Should(gomega.BeNil())
+	if err != nil {
+		return fmt.Errorf("expected provider network %s to not be found: %w", name, err)
 	}
-	if IsTimeout(err) {
-		return TimeoutError(fmt.Sprintf("timed out while waiting for subnet %s to disappear", name),
-			lastProviderNetwork,
-		)
-	}
-	return maybeTimeoutError(err, "waiting for subnet %s to disappear", name)
+	return nil
 }
 
 func MakeProviderNetwork(name string, exchangeLinkName bool, defaultInterface string, customInterfaces map[string][]string, excludeNodes []string) *apiv1.ProviderNetwork {

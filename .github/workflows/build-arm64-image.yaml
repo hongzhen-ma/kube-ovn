@@ -18,19 +18,23 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
+env:
+  GO_VERSION: ''
+
 jobs:
   build:
     name: Build arm64
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
-      - uses: docker/setup-buildx-action@v2
-      - uses: docker/setup-qemu-action@v2
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v5
         with:
+          go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
           check-latest: true
           cache: false
@@ -39,7 +43,7 @@ jobs:
         run: echo "GO_FULL_VER=$(go version | awk '{print $3}')" >> "$GITHUB_ENV"
 
       - name: Go Cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
@@ -61,10 +65,12 @@ jobs:
           echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
           docker tag kubeovn/kube-ovn:$TAG kubeovn/kube-ovn:$TAG-arm
           docker tag kubeovn/kube-ovn:$TAG kubeovn/kube-ovn-dev:$COMMIT-arm
+          docker tag kubeovn/kube-ovn:$TAG-debug kubeovn/kube-ovn:$TAG-debug-arm
           docker tag kubeovn/vpc-nat-gateway:$TAG kubeovn/vpc-nat-gateway:$TAG-arm
           docker tag kubeovn/vpc-nat-gateway:$TAG kubeovn/vpc-nat-gateway-dev:$COMMIT-arm
           docker images
           docker push kubeovn/kube-ovn:$TAG-arm
+          docker push kubeovn/kube-ovn:$TAG-debug-arm
           docker push kubeovn/kube-ovn-dev:$COMMIT-arm
           docker push kubeovn/vpc-nat-gateway:$TAG-arm
           docker push kubeovn/vpc-nat-gateway-dev:$COMMIT-arm

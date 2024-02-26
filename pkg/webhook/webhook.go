@@ -2,11 +2,10 @@ package webhook
 
 import (
 	"context"
-	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/rest"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,16 +25,11 @@ type ValidatingHook struct {
 	cache   cache.Cache
 }
 
-func NewValidatingHook(c cache.Cache) (*ValidatingHook, error) {
-	cfg, err := rest.InClusterConfig()
-	if err != nil {
-		klog.Errorf("use in cluster config failed %v", err)
-		return nil, err
-	}
-	cfg.Timeout = 15 * time.Second
-
+func NewValidatingHook(client client.Client, scheme *runtime.Scheme, cache cache.Cache) (*ValidatingHook, error) {
 	v := &ValidatingHook{
-		cache: c,
+		client:  client,
+		decoder: admission.NewDecoder(scheme),
+		cache:   cache,
 	}
 
 	// initialize hook handlers mapping
@@ -54,6 +48,9 @@ func NewValidatingHook(c cache.Cache) (*ValidatingHook, error) {
 	updateHooks[vpcGVK] = v.VpcUpdateHook
 	deleteHooks[vpcGVK] = v.VpcDeleteHook
 
+	createHooks[ipGVK] = v.IPCreateHook
+	updateHooks[ipGVK] = v.IPUpdateHook
+
 	createHooks[vipGVK] = v.VipCreateHook
 	updateHooks[vipGVK] = v.VipUpdateHook
 
@@ -69,6 +66,16 @@ func NewValidatingHook(c cache.Cache) (*ValidatingHook, error) {
 	updateHooks[iptablesDnatRule] = v.iptablesDnatUpdateHook
 	createHooks[iptablesFIPRule] = v.iptablesFipCreateHook
 	updateHooks[iptablesFIPRule] = v.iptablesFipUpdateHook
+
+	createHooks[ovnEip] = v.ovnEipCreateHook
+	updateHooks[ovnEip] = v.ovnEipUpdateHook
+	deleteHooks[ovnEip] = v.ovnEipDeleteHook
+	createHooks[ovnFip] = v.ovnFipCreateHook
+	updateHooks[ovnFip] = v.ovnFipUpdateHook
+	createHooks[ovnSnat] = v.ovnSnatCreateHook
+	updateHooks[ovnSnat] = v.ovnSnatUpdateHook
+	createHooks[ovnDnat] = v.ovnDnatCreateHook
+	updateHooks[ovnDnat] = v.ovnDnatUpdateHook
 	return v, nil
 }
 
@@ -103,14 +110,4 @@ func (v *ValidatingHook) Handle(ctx context.Context, req admission.Request) (res
 	}
 	resp = ctrlwebhook.Allowed("by pass")
 	return
-}
-
-func (v *ValidatingHook) InjectDecoder(d *admission.Decoder) error {
-	v.decoder = d
-	return nil
-}
-
-func (v *ValidatingHook) InjectClient(c client.Client) error {
-	v.client = c
-	return nil
 }

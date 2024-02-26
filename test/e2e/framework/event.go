@@ -13,6 +13,7 @@ import (
 type EventClient struct {
 	f *Framework
 	typedcorev1.EventInterface
+	namespace string
 }
 
 func (f *Framework) EventClient() *EventClient {
@@ -23,14 +24,15 @@ func (f *Framework) EventClientNS(namespace string) *EventClient {
 	return &EventClient{
 		f:              f,
 		EventInterface: f.ClientSet.CoreV1().Events(namespace),
+		namespace:      namespace,
 	}
 }
 
 // WaitToHaveEvent waits the provided resource to have the specified event(s)
 func (c *EventClient) WaitToHaveEvent(kind, name, eventType, reason, sourceComponent, sourceHost string) []corev1.Event {
 	var result []corev1.Event
-	err := wait.Poll(poll, timeout, func() (bool, error) {
-		Logf("Waiting for %s %s/%s to have event %s/%s", kind, c.f.Namespace.Name, name, eventType, reason)
+	err := wait.PollUntilContextTimeout(context.Background(), poll, timeout, false, func(ctx context.Context) (bool, error) {
+		Logf("Waiting for %s %s/%s to have event %s/%s", kind, c.namespace, name, eventType, reason)
 		selector := fields.Set{
 			"involvedObject.kind": kind,
 			"involvedObject.name": name,
@@ -38,7 +40,7 @@ func (c *EventClient) WaitToHaveEvent(kind, name, eventType, reason, sourceCompo
 			"reason":              reason,
 		}
 
-		events, err := c.List(context.TODO(), metav1.ListOptions{FieldSelector: selector.AsSelector().String()})
+		events, err := c.List(ctx, metav1.ListOptions{FieldSelector: selector.AsSelector().String()})
 		if err != nil {
 			return handleWaitingAPIError(err, true, "listing events")
 		}

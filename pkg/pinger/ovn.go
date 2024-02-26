@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"k8s.io/klog/v2"
-
-	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
 func checkOvs(config *Configuration) error {
@@ -39,17 +38,19 @@ func checkPortBindings(config *Configuration) error {
 	klog.Infof("start to check port binding")
 	ovsBindings, err := checkOvsBindings()
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 
 	sbBindings, err := checkSBBindings(config)
 	if err != nil {
+		klog.Error(err)
 		return err
 	}
 	klog.Infof("port in sb is %v", sbBindings)
 	misMatch := []string{}
 	for _, port := range ovsBindings {
-		if !util.IsStringIn(port, sbBindings) {
+		if !slices.Contains(sbBindings, port) {
 			misMatch = append(misMatch, port)
 		}
 	}
@@ -57,10 +58,10 @@ func checkPortBindings(config *Configuration) error {
 		klog.Errorf("%d port %v not exist in sb-bindings", len(misMatch), misMatch)
 		inconsistentPortBindingGauge.WithLabelValues(config.NodeName).Set(float64(len(misMatch)))
 		return fmt.Errorf("%d port %v not exist in sb-bindings", len(misMatch), misMatch)
-	} else {
-		klog.Infof("ovs and ovn-sb binding check passed")
-		inconsistentPortBindingGauge.WithLabelValues(config.NodeName).Set(0)
 	}
+
+	klog.Infof("ovs and ovn-sb binding check passed")
+	inconsistentPortBindingGauge.WithLabelValues(config.NodeName).Set(0)
 	return nil
 }
 
@@ -123,7 +124,7 @@ func checkSBBindings(config *Configuration) ([]string, error) {
 	}
 	output, err := exec.Command("ovn-sbctl", command...).CombinedOutput()
 	if err != nil {
-		klog.Errorf("failed to find chassis %v", err)
+		klog.Errorf("failed to find chassis: %v, %s", err, string(output))
 		return nil, err
 	}
 	if len(output) == 0 {
@@ -142,7 +143,8 @@ func checkSBBindings(config *Configuration) ([]string, error) {
 		"--timeout=10",
 		"find",
 		"port_binding",
-		fmt.Sprintf("chassis=%s", chassis)}
+		fmt.Sprintf("chassis=%s", chassis),
+	}
 	if os.Getenv("ENABLE_SSL") == "true" {
 		command = []string{
 			"-p", "/var/run/tls/key",
